@@ -1,17 +1,35 @@
-import { getApp, getApps, initializeApp } from 'firebase/app';
+import { getApp, getApps, initializeApp, type FirebaseApp } from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithPopup,
+  type Auth,
   type User,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 export const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-const auth = getAuth(app);
+let cachedAuth: Auth | null = null;
+let authInitError: Error | null = null;
+
+function getFirebaseAuthSafe(): Auth | null {
+  if (cachedAuth) return cachedAuth;
+  if (authInitError) return null;
+  try {
+    const app: FirebaseApp =
+      getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+    cachedAuth = getAuth(app);
+    return cachedAuth;
+  } catch (err: unknown) {
+    authInitError =
+      err instanceof Error
+        ? err
+        : new Error('មិនអាចចាប់ផ្តើមសេវាកម្មចូលគណនី Google បានទេ។');
+    return null;
+  }
+}
 
 let isSigningIn = false;
 // In-memory only access token cache (never stored in localStorage/sessionStorage)
@@ -51,7 +69,7 @@ function mapFirebaseAuthError(error: unknown): Error {
       return new Error('សំណើចូលគណនីត្រូវបានផ្អាក ដោយសារមានការចុចច្រើនដង។ សូមព្យាយាមម្តងទៀត។');
     case 'auth/unauthorized-domain':
       return new Error(
-        'ដែនវេបសាយនេះមិនទាន់ត្រូវបានអនុញ្ញាតសម្រាប់ការចូលគណនី Google ទេ។ សូមបើកតាមតំណភ្ជាប់ផ្លូវការរបស់កម្មវិធី។'
+        'ដែនវេបសាយនេះមិនទាន់ត្រូវបានអនុញ្ញាតសម្រាប់ការចូលគណនី Google ទេ។ សូមបន្ថែមដែននេះក្នុង Firebase Authorized Domains ឬប្រើការរក្សាទុក JSON។'
       );
     case 'auth/network-request-failed':
       return new Error('មិនអាចភ្ជាប់អ៊ីនធឺណិតបានទេ។ សូមពិនិត្យការភ្ជាប់បណ្តាញរបស់អ្នក។');
@@ -73,6 +91,11 @@ export function initGoogleAuth(
   onAuthReady: (user: User, token: string) => void,
   onNeedsAuth: (user: User | null) => void
 ): () => void {
+  const auth = getFirebaseAuthSafe();
+  if (!auth) {
+    onNeedsAuth(null);
+    return () => {};
+  }
   return onAuthStateChanged(auth, (user) => {
     if (user && cachedAccessToken) {
       onAuthReady(user, cachedAccessToken);
@@ -89,6 +112,13 @@ export async function signInWithGoogleDrive(
   user: User;
   accessToken: string;
 }> {
+  const auth = getFirebaseAuthSafe();
+  if (!auth) {
+    throw (
+      authInitError ||
+      new Error('មិនអាចចាប់ផ្តើមសេវាកម្ម Google Drive បានទេ។ សូមប្រើការទាញយក JSON ជាបណ្តោះអាសន្ន។')
+    );
+  }
   try {
     isSigningIn = true;
     const provider = buildGoogleProvider(forceConsent || needsConsentPrompt);
@@ -124,5 +154,8 @@ export function clearCachedAccessToken(): void {
 export async function signOutGoogle(): Promise<void> {
   cachedAccessToken = null;
   needsConsentPrompt = false;
-  await auth.signOut();
+  const auth = getFirebaseAuthSafe();
+  if (auth) {
+    await auth.signOut();
+  }
 }
