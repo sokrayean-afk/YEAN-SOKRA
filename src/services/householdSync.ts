@@ -18,6 +18,7 @@ import {
 } from 'firebase/firestore';
 import { DEFAULT_SETTINGS } from '../data/defaults';
 import type {
+  ActiveUser,
   HouseholdSettings,
   RecurringBill,
   Transaction,
@@ -28,6 +29,7 @@ import {
   handleFirestoreError,
   OperationType,
 } from './firebase';
+import { isMasterEmail } from './googleAuth';
 
 export interface CloudHouseholdMeta {
   householdId: string;
@@ -37,10 +39,32 @@ export interface CloudHouseholdMeta {
   settings: HouseholdSettings;
 }
 
+export interface HouseholdEmailInvite {
+  id: string;
+  email: string;
+  householdId: string;
+  ownerId: string;
+  inviteCode: string;
+  profileRole: ActiveUser;
+  displayLabel: string;
+  createdAt: string;
+}
+
+export type ResolveHouseholdResult =
+  | {
+      status: 'ready';
+      householdId: string;
+      assignedProfileRole?: ActiveUser;
+    }
+  | {
+      status: 'needs_invite';
+    };
+
 const VALID_PAYMENT = new Set(['cash', 'aba', 'acleda', 'wing', 'other']);
 const VALID_MEMBER = new Set(['joint', 'husband', 'wife', 'family']);
 const SAFE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function sanitizeId(raw: string, prefix: string): string {
   const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 100);
@@ -68,9 +92,13 @@ function sanitizeSettingsForFirestore(settings: HouseholdSettings) {
   }
 
   return {
-    householdName: (settings.householdName || DEFAULT_SETTINGS.householdName).trim().slice(0, 100) || 'គ្រួសារយើង',
-    husbandName: (settings.husbandName || DEFAULT_SETTINGS.husbandName).trim().slice(0, 60) || 'ប្តី',
-    wifeName: (settings.wifeName || DEFAULT_SETTINGS.wifeName).trim().slice(0, 60) || 'ប្រពន្ធ',
+    householdName:
+      (settings.householdName || DEFAULT_SETTINGS.householdName).trim().slice(0, 100) ||
+      'គ្រួសារយើង',
+    husbandName:
+      (settings.husbandName || DEFAULT_SETTINGS.husbandName).trim().slice(0, 60) || 'ប្តី',
+    wifeName:
+      (settings.wifeName || DEFAULT_SETTINGS.wifeName).trim().slice(0, 60) || 'ប្រពន្ធ',
     activeUser: settings.activeUser === 'wife' ? 'wife' : 'husband',
     cycleMode: settings.cycleMode === 'custom_range' ? 'custom_range' : 'monthly_day',
     cycleStartDay: Math.max(1, Math.min(28, Math.floor(settings.cycleStartDay || 1))),
@@ -89,7 +117,9 @@ function sanitizeSettingsForFirestore(settings: HouseholdSettings) {
       0,
       Math.min(
         10000000,
-        Number.isFinite(settings.monthlyBudgetTargetUsd) ? settings.monthlyBudgetTargetUsd : 0
+        Number.isFinite(settings.monthlyBudgetTargetUsd)
+          ? settings.monthlyBudgetTargetUsd
+          : 0
       )
     ),
     notificationsEnabled: Boolean(settings.notificationsEnabled),
@@ -107,11 +137,20 @@ function buildTransactionPayload(
   isCreate: boolean
 ) {
   const safeId = sanitizeId(tx.id, 'tx');
-  const safeCat = sanitizeId(tx.categoryId || (tx.type === 'income' ? 'other_inc' : 'other_exp'), 'cat').slice(0, 50);
-  const amountUsd = Math.max(0, Math.min(100000000, Number.isFinite(tx.amountUsd) ? Number(tx.amountUsd.toFixed(2)) : 0));
+  const safeCat = sanitizeId(
+    tx.categoryId || (tx.type === 'income' ? 'other_inc' : 'other_exp'),
+    'cat'
+  ).slice(0, 50);
+  const amountUsd = Math.max(
+    0,
+    Math.min(100000000, Number.isFinite(tx.amountUsd) ? Number(tx.amountUsd.toFixed(2)) : 0)
+  );
   const originalAmount = Math.max(
     0,
-    Math.min(1000000000000, Number.isFinite(tx.originalAmount) ? Number(tx.originalAmount.toFixed(2)) : amountUsd)
+    Math.min(
+      1000000000000,
+      Number.isFinite(tx.originalAmount) ? Number(tx.originalAmount.toFixed(2)) : amountUsd
+    )
   );
 
   const base: Record<string, unknown> = {
@@ -159,9 +198,13 @@ function buildBillPayload(
   }
 
   const base: Record<string, unknown> = {
-    title: (bill.title || 'វិក្កយបត្រប្រចាំខែ').trim().slice(0, 120) || 'វិក្កយបត្រប្រចាំខែ',
+    title:
+      (bill.title || 'វិក្កយបត្រប្រចាំខែ').trim().slice(0, 120) || 'វិក្កយបត្រប្រចាំខែ',
     categoryId: safeCat,
-    amountUsd: Math.max(0, Math.min(100000000, Number.isFinite(bill.amountUsd) ? Number(bill.amountUsd.toFixed(2)) : 0)),
+    amountUsd: Math.max(
+      0,
+      Math.min(100000000, Number.isFinite(bill.amountUsd) ? Number(bill.amountUsd.toFixed(2)) : 0)
+    ),
     dueDay: Math.max(1, Math.min(28, Math.floor(bill.dueDay || 1))),
     paymentMethod: VALID_PAYMENT.has(bill.paymentMethod) ? bill.paymentMethod : 'aba',
     note: (bill.note || '').slice(0, 300),
@@ -309,6 +352,22 @@ function mapDocToBill(id: string, data: Record<string, unknown>): RecurringBill 
   };
 }
 
+function mapDocToEmailInvite(
+  id: string,
+  data: Record<string, unknown>
+): HouseholdEmailInvite {
+  return {
+    id: typeof data.id === 'string' && data.id ? data.id : id,
+    email: typeof data.email === 'string' ? data.email : '',
+    householdId: typeof data.householdId === 'string' ? data.householdId : '',
+    ownerId: typeof data.ownerId === 'string' ? data.ownerId : '',
+    inviteCode: typeof data.inviteCode === 'string' ? data.inviteCode : '',
+    profileRole: data.profileRole === 'husband' ? 'husband' : 'wife',
+    displayLabel: typeof data.displayLabel === 'string' ? data.displayLabel : '',
+    createdAt: timestampToIso(data.createdAt),
+  };
+}
+
 async function commitBatchedWrites(
   ops: Array<(batch: ReturnType<typeof writeBatch>) => void>
 ): Promise<void> {
@@ -325,19 +384,20 @@ async function commitBatchedWrites(
 }
 
 /**
- * Ensures the signed-in user has an active shared household in Firestore.
- * - Existing user (on any device): returns their existing activeHouseholdId immediately.
- * - New user: atomically creates household + owner membership + invite code + workspace pointer,
- *   then uploads any current local transactions & bills so nothing is lost.
+ * Resolves single-system household access for any signed-in user:
+ * 1. If user already has an activeHouseholdId pointer -> enters immediately.
+ * 2. If user is the Master Admin account -> creates the single shared household & seeds data.
+ * 3. If user is a Spouse/Member whose Gmail was pre-authorized by Master -> auto-joins immediately.
+ * 4. Otherwise -> returns `needs_invite` so they join the single household via Invite Code (never creates a duplicate system).
  */
-export async function ensureUserHousehold(
+export async function resolveUserHousehold(
   user: User,
   initialLocal: {
     transactions: Transaction[];
     bills: RecurringBill[];
     settings: HouseholdSettings;
   }
-): Promise<string> {
+): Promise<ResolveHouseholdResult> {
   const db = getFirebaseDbSafe();
   if (!db) {
     throw new Error('មិនអាចភ្ជាប់ទៅមូលដ្ឋានទិន្នន័យ Cloud បានទេ។');
@@ -358,14 +418,45 @@ export async function ensureUserHousehold(
   }
 
   if (existingHouseholdId) {
-    return existingHouseholdId;
+    return { status: 'ready', householdId: existingHouseholdId };
   }
 
+  // Non-master account: check if Master pre-authorized their Gmail for instant single-system login
+  if (!isMasterEmail(user.email)) {
+    const normalizedEmail = (user.email || '').trim().toLowerCase();
+    if (normalizedEmail && EMAIL_RE.test(normalizedEmail)) {
+      try {
+        const q = query(
+          collection(db, 'householdEmailInvites'),
+          where('email', '==', normalizedEmail)
+        );
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          const invite = mapDocToEmailInvite(
+            snap.docs[0].id,
+            snap.docs[0].data() as Record<string, unknown>
+          );
+          if (invite.inviteCode) {
+            const joinedId = await joinHouseholdByInviteCode(user, invite.inviteCode);
+            return {
+              status: 'ready',
+              householdId: joinedId,
+              assignedProfileRole: invite.profileRole,
+            };
+          }
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'householdEmailInvites');
+      }
+    }
+    return { status: 'needs_invite' };
+  }
+
+  // Master Admin first-time setup: atomically create the single shared household
   const householdId = sanitizeId(`hh_${user.uid}`, 'hh');
   const inviteCode = generateInviteCode();
   const safeSettings = sanitizeSettingsForFirestore(initialLocal.settings);
 
-  // Atomic Batch 1: Create household + owner member + invite lookup + user workspace
   try {
     const batch = writeBatch(db);
     batch.set(doc(db, 'households', householdId), {
@@ -400,7 +491,7 @@ export async function ensureUserHousehold(
     handleFirestoreError(err, OperationType.CREATE, `households/${householdId}`);
   }
 
-  // Batch 2: Seed initial local transactions & bills into the newly created cloud household
+  // Seed initial local transactions & bills into the newly created single household
   const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
   for (const tx of initialLocal.transactions) {
     const { safeId, payload } = buildTransactionPayload(
@@ -435,11 +526,11 @@ export async function ensureUserHousehold(
     }
   }
 
-  return householdId;
+  return { status: 'ready', householdId };
 }
 
 /**
- * Joins an existing shared household using the spouse's 8-character invite code.
+ * Joins the single shared household using the Master's 8-character invite code.
  */
 export async function joinHouseholdByInviteCode(
   user: User,
@@ -475,7 +566,6 @@ export async function joinHouseholdByInviteCode(
     throw new Error('លេខកូដគ្រួសារមិនមានទិន្នន័យត្រឹមត្រូវទេ។');
   }
 
-  // Check if already a member
   const memberRef = doc(db, 'households', targetHouseholdId, 'members', user.uid);
   let alreadyMember = false;
   try {
@@ -509,7 +599,6 @@ export async function joinHouseholdByInviteCode(
     }
   }
 
-  // Use arrayUnion(user.uid) to add self to memberIds atomically with member doc creation
   try {
     const batch = writeBatch(db);
     batch.set(memberRef, {
@@ -549,7 +638,94 @@ export async function joinHouseholdByInviteCode(
 }
 
 /**
- * Backfills memberIds on existing transactions & bills when a new spouse joins the household
+ * Master-only: Subscribe to authorized household email invites.
+ */
+export function subscribeEmailInvites(
+  ownerId: string,
+  onChange: (invites: HouseholdEmailInvite[]) => void,
+  onError: (err: Error) => void
+): Unsubscribe {
+  const db = getFirebaseDbSafe();
+  if (!db) return () => {};
+
+  const q = query(
+    collection(db, 'householdEmailInvites'),
+    where('ownerId', '==', ownerId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => mapDocToEmailInvite(d.id, d.data() as Record<string, unknown>))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      onChange(list);
+    },
+    (err) => {
+      try {
+        handleFirestoreError(err, OperationType.LIST, 'householdEmailInvites');
+      } catch (wrapped) {
+        onError(wrapped as Error);
+      }
+    }
+  );
+}
+
+/**
+ * Master-only: Authorize a spouse/family Gmail to automatically log into this single household.
+ */
+export async function addEmailInviteInCloud(params: {
+  email: string;
+  householdId: string;
+  ownerId: string;
+  inviteCode: string;
+  profileRole: ActiveUser;
+  displayLabel: string;
+}): Promise<void> {
+  const db = getFirebaseDbSafe();
+  if (!db) {
+    throw new Error('មិនអាចភ្ជាប់ទៅមូលដ្ឋានទិន្នន័យ Cloud បានទេ។');
+  }
+  const normalizedEmail = params.email.trim().toLowerCase();
+  if (!EMAIL_RE.test(normalizedEmail) || normalizedEmail.length > 254) {
+    throw new Error('សូមបញ្ចូលអាសយដ្ឋាន Gmail ឱ្យបានត្រឹមត្រូវ។');
+  }
+
+  const inviteId = sanitizeId(
+    `inv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    'inv'
+  );
+  const path = `householdEmailInvites/${inviteId}`;
+  try {
+    await setDoc(doc(db, 'householdEmailInvites', inviteId), {
+      id: inviteId,
+      email: normalizedEmail,
+      householdId: params.householdId,
+      ownerId: params.ownerId,
+      inviteCode: params.inviteCode,
+      profileRole: params.profileRole === 'husband' ? 'husband' : 'wife',
+      displayLabel:
+        params.displayLabel.trim().slice(0, 60) ||
+        (params.profileRole === 'husband' ? 'ប្តី' : 'ប្រពន្ធ'),
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, path);
+  }
+}
+
+export async function deleteEmailInviteFromCloud(inviteId: string): Promise<void> {
+  const db = getFirebaseDbSafe();
+  if (!db) return;
+  const path = `householdEmailInvites/${inviteId}`;
+  try {
+    await deleteDoc(doc(db, 'householdEmailInvites', inviteId));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
+  }
+}
+
+/**
+ * Backfills memberIds on existing transactions & bills when a spouse joins the household
  * so the spouse immediately sees full household history on their device.
  */
 async function syncSubcollectionMemberIds(
@@ -613,7 +789,10 @@ export function subscribeHousehold(
       doc(db, 'households', householdId),
       (snap) => {
         if (!snap.exists()) return;
-        const meta = mapDocToHouseholdMeta(householdId, snap.data() as Record<string, unknown>);
+        const meta = mapDocToHouseholdMeta(
+          householdId,
+          snap.data() as Record<string, unknown>
+        );
         callbacks.onHouseholdMeta(meta);
         if (meta.memberIds.length > 1) {
           void syncSubcollectionMemberIds(householdId, uid, meta.memberIds).catch(() => {
@@ -642,7 +821,11 @@ export function subscribeHousehold(
       (snap) => {
         const list = snap.docs
           .map((d) => mapDocToTransaction(d.id, d.data() as Record<string, unknown>))
-          .sort((a, b) => (b.date !== a.date ? b.date.localeCompare(a.date) : b.createdAt.localeCompare(a.createdAt)));
+          .sort((a, b) =>
+            b.date !== a.date
+              ? b.date.localeCompare(a.date)
+              : b.createdAt.localeCompare(a.createdAt)
+          );
         callbacks.onTransactions(list);
       },
       (err) => {
@@ -822,7 +1005,6 @@ export async function replaceAllHouseholdDataInCloud(
 
   const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
 
-  // Delete existing cloud transactions and bills belonging to this member query
   try {
     const existingTxSnap = await getDocs(
       query(
@@ -847,7 +1029,6 @@ export async function replaceAllHouseholdDataInCloud(
     handleFirestoreError(err, OperationType.LIST, `households/${householdId}`);
   }
 
-  // Update household settings
   ops.push((b) =>
     b.update(doc(db, 'households', householdId), {
       ...sanitizeSettingsForFirestore(next.settings),
@@ -855,7 +1036,6 @@ export async function replaceAllHouseholdDataInCloud(
     })
   );
 
-  // Write replacement transactions & bills
   for (const tx of next.transactions) {
     const { safeId, payload } = buildTransactionPayload(
       tx,

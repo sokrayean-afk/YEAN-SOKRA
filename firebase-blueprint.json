@@ -440,6 +440,73 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "HouseholdEmailInvite": {
+      "title": "HouseholdEmailInvite",
+      "description": "Master-authorized email access entry allowing a spouse to automatically join the single shared household upon Google sign-in.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Invite document ID matching path variable."
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 254,
+          "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+          "description": "Lowercased authorized Google email of the household member."
+        },
+        "householdId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Target single household ID."
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Master owner UID who authorized this email."
+        },
+        "inviteCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 12,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Household invite code linked to the master household."
+        },
+        "profileRole": {
+          "type": "string",
+          "enum": ["husband", "wife"],
+          "description": "Default local profile assigned to this member on login."
+        },
+        "displayLabel": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Friendly display label for this member."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when email access was granted."
+        }
+      },
+      "required": [
+        "id",
+        "email",
+        "householdId",
+        "ownerId",
+        "inviteCode",
+        "profileRole",
+        "displayLabel",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -450,6 +517,10 @@
     "/householdInvites/{inviteCode}": {
       "schema": { "$ref": "#/entities/HouseholdInvite" },
       "description": "Direct get-only lookup mapping an invite code to its household ID."
+    },
+    "/householdEmailInvites/{inviteId}": {
+      "schema": { "$ref": "#/entities/HouseholdEmailInvite" },
+      "description": "Master-managed email access records enabling automatic single-system login for authorized household users."
     },
     "/households/{householdId}": {
       "schema": { "$ref": "#/entities/Household" },

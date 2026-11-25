@@ -6,26 +6,33 @@ import {
   CloudUpload,
   Copy,
   Download,
-  Link2,
   LogOut,
   RefreshCw,
+  ShieldCheck,
   Trash2,
+  UserPlus,
   Users,
   X,
 } from 'lucide-react';
 import { useState } from 'react';
 import { getFirebaseProjectId } from '../services/googleAuth';
 import { DRIVE_DATA_FILENAME, type DriveFileMeta } from '../services/googleDrive';
-import type { CloudHouseholdMeta } from '../services/householdSync';
+import type {
+  CloudHouseholdMeta,
+  HouseholdEmailInvite,
+} from '../services/householdSync';
+import type { ActiveUser } from '../types/finance';
 import { GoogleSignInButton } from './GoogleSignInButton';
 
 interface DriveModalProps {
   isOpen: boolean;
   onClose: () => void;
   googleUser: User | null;
+  isMasterAccount: boolean;
   cloudMeta: CloudHouseholdMeta | null;
   cloudSyncStatus: 'offline' | 'connecting' | 'synced' | 'error';
   cloudSyncError: string;
+  emailInvites: HouseholdEmailInvite[];
   hasDriveToken: boolean;
   driveFile: DriveFileMeta | null;
   isBusy: boolean;
@@ -34,9 +41,12 @@ interface DriveModalProps {
   successMsg: string;
   localTxCount: number;
   localBillCount: number;
-  onSignIn: () => Promise<void>;
+  husbandName: string;
+  wifeName: string;
+  onConnectMasterDrive: () => Promise<void>;
   onSignOut: () => Promise<void>;
-  onJoinHousehold: (inviteCode: string) => Promise<void>;
+  onAddEmailInvite: (email: string, profileRole: ActiveUser) => Promise<void>;
+  onDeleteEmailInvite: (inviteId: string) => Promise<void>;
   onRefreshFile: () => Promise<void>;
   onConfirmSaveToDrive: () => Promise<void>;
   onConfirmLoadFromDrive: () => Promise<void>;
@@ -66,9 +76,11 @@ export function DriveModal({
   isOpen,
   onClose,
   googleUser,
+  isMasterAccount,
   cloudMeta,
   cloudSyncStatus,
   cloudSyncError,
+  emailInvites,
   hasDriveToken,
   driveFile,
   isBusy,
@@ -77,9 +89,12 @@ export function DriveModal({
   successMsg,
   localTxCount,
   localBillCount,
-  onSignIn,
+  husbandName,
+  wifeName,
+  onConnectMasterDrive,
   onSignOut,
-  onJoinHousehold,
+  onAddEmailInvite,
+  onDeleteEmailInvite,
   onRefreshFile,
   onConfirmSaveToDrive,
   onConfirmLoadFromDrive,
@@ -89,16 +104,19 @@ export function DriveModal({
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [copiedDomain, setCopiedDomain] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
-  const [joinCode, setJoinCode] = useState('');
-  const [joinBusy, setJoinBusy] = useState(false);
-  const [joinError, setJoinError] = useState('');
-  const [joinSuccess, setJoinSuccess] = useState('');
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<ActiveUser>('wife');
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteError, setInviteError] = useState('');
+  const [inviteSuccess, setInviteSuccess] = useState('');
 
   if (!isOpen) return null;
 
   const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
   const projectId = getFirebaseProjectId();
   const isUnauthorizedDomain = errorCode === 'auth/unauthorized-domain';
+  const husbandLabel = husbandName.trim() || 'ប្តី';
+  const wifeLabel = wifeName.trim() || 'ប្រពន្ធ';
 
   const handleCopyText = async (text: string, which: 'domain' | 'code') => {
     if (!text) return;
@@ -128,22 +146,24 @@ export function DriveModal({
     }
   };
 
-  const handleSubmitJoin = async (e: React.FormEvent) => {
+  const handleSubmitEmailInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!joinCode.trim()) return;
-    setJoinBusy(true);
-    setJoinError('');
-    setJoinSuccess('');
+    if (!inviteEmail.trim()) return;
+    setInviteBusy(true);
+    setInviteError('');
+    setInviteSuccess('');
     try {
-      await onJoinHousehold(joinCode);
-      setJoinCode('');
-      setJoinSuccess('បានភ្ជាប់ចូលគណនីគ្រួសារដូចគ្នាដោយជោគជ័យ! ទិន្នន័យកំពុងធ្វើសមកាលកម្ម។');
+      await onAddEmailInvite(inviteEmail, inviteRole);
+      setInviteEmail('');
+      setInviteSuccess(
+        'បានបន្ថែមអ្នកប្រើប្រាស់រួចរាល់! គាត់គ្រាន់តែចូលប្រព័ន្ធដោយគណនី Google នេះនឹងឃើញទិន្នន័យគ្រួសារតែមួយភ្លាម។'
+      );
     } catch (err: unknown) {
-      setJoinError(
-        err instanceof Error ? err.message : 'មិនអាចភ្ជាប់តាមលេខកូដនេះបានទេ។'
+      setInviteError(
+        err instanceof Error ? err.message : 'មិនអាចបន្ថែមអ៊ីមែលអ្នកប្រើប្រាស់បានទេ។'
       );
     } finally {
-      setJoinBusy(false);
+      setInviteBusy(false);
     }
   };
 
@@ -164,7 +184,7 @@ export function DriveModal({
           <div className="flex items-center gap-2.5">
             <Cloud className="w-5 h-5 text-teal-700 shrink-0" />
             <h2 id="drive-modal-title" className="text-base font-semibold text-slate-900">
-              សមកាលកម្មអនឡាញ និងបម្រុងទុក
+              គណនីប្រព័ន្ធតែមួយ និង Google Drive
             </h2>
           </div>
           <button
@@ -181,27 +201,24 @@ export function DriveModal({
         </div>
 
         <div className="p-5 sm:p-6 space-y-5 overflow-y-auto">
-          {!googleUser ? (
-            <div className="space-y-4">
-              <p className="text-sm text-slate-600 leading-relaxed">
-                ចូលគណនី Google ដើម្បីរក្សាទុកទិន្នន័យលើ Cloud អនឡាញដោយស្វ័យប្រវត្តិ។
-                អ្នកអាចបើកកម្មវិធីលើទូរស័ព្ទ ឬកុំព្យូទ័រណាក៏ដោយ ហើយមើលឃើញ និងកត់ត្រាទិន្នន័យគ្រួសារតែមួយភ្លាមៗ។
-              </p>
-
-              <GoogleSignInButton
-                onClick={onSignIn}
-                disabled={isBusy}
-                fullWidth
-                label={isBusy ? 'កំពុងភ្ជាប់...' : 'ចូលគណនីជាមួយ Google'}
-              />
-            </div>
-          ) : (
+          {googleUser && (
             <div className="space-y-5">
               {/* Connected Account Header */}
               <div className="flex items-center justify-between gap-3 pb-4 border-b border-slate-100">
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-slate-900 truncate">
-                    {googleUser.displayName || 'គណនី Google'}
+                <div className="min-w-0 space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-slate-900 truncate">
+                      {googleUser.displayName || 'គណនី Google'}
+                    </span>
+                    <span
+                      className={`text-[10px] font-semibold px-2 py-0.5 rounded-md shrink-0 ${
+                        isMasterAccount
+                          ? 'bg-teal-50 text-teal-800 border border-teal-200'
+                          : 'bg-slate-100 text-slate-700'
+                      }`}
+                    >
+                      {isMasterAccount ? 'គណនីមេ' : 'សមាជិក'}
+                    </span>
                   </div>
                   <div className="text-xs text-slate-500 truncate">
                     {googleUser.email}
@@ -218,91 +235,132 @@ export function DriveModal({
                 </button>
               </div>
 
-              {/* Section 1: Real-Time Online Multi-Device Cloud Sync */}
-              <div className="bg-teal-50/70 border border-teal-200 rounded-xl p-4 space-y-3">
+              {/* Section 1: Single-System Users & Sync */}
+              <div className="bg-teal-50/70 border border-teal-200 rounded-xl p-4 space-y-3.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-semibold text-teal-900 flex items-center gap-1.5">
                     <Users className="w-4 h-4 text-teal-700" />
-                    សមកាលកម្មអនឡាញគ្រប់ឧបករណ៍
+                    អ្នកប្រើប្រាស់ក្នុងប្រព័ន្ធតែមួយ
                   </span>
                   <span className="text-[11px] font-semibold text-teal-800">
                     {cloudSyncStatus === 'synced'
-                      ? 'កំពុងដំណើរការ'
+                      ? 'កំពុងភ្ជាប់អនឡាញ'
                       : cloudSyncStatus === 'connecting'
                       ? 'កំពុងភ្ជាប់...'
                       : 'មានបញ្ហា'}
                   </span>
                 </div>
 
-                <p className="text-xs text-slate-700 leading-relaxed">
-                  រាល់ការកត់ត្រាថ្មីត្រូវបានរក្សាទុកអនឡាញដោយស្វ័យប្រវត្តិ។ ចូលគណនី Google
-                  ដូចគ្នាលើឧបករណ៍ផ្សេង ឬប្រើលេខកូដខាងក្រោមដើម្បីភ្ជាប់គណនីប្តី និងប្រពន្ធចូលគ្នា។
-                </p>
+                {isMasterAccount ? (
+                  <div className="space-y-3.5">
+                    <p className="text-xs text-slate-700 leading-relaxed">
+                      បន្ថែមអ៊ីមែល Google របស់ប្តី ឬប្រពន្ធខាងក្រោម ដើម្បីឱ្យគាត់ចូលប្រើប្រព័ន្ធគ្រួសារតែមួយនេះភ្លាមៗ (មិនចាំបាច់ភ្ជាប់ Google Drive ទេ)។
+                    </p>
 
-                {cloudMeta?.inviteCode && (
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-medium text-slate-600">
-                      លេខកូដភ្ជាប់គ្រួសារ ({cloudMeta.memberIds.length} គណនីបានភ្ជាប់)
-                    </div>
-                    <div className="flex items-center justify-between gap-2 bg-white border border-teal-200 rounded-lg px-3 py-2">
-                      <span className="font-mono text-sm font-bold tracking-widest text-slate-900">
-                        {cloudMeta.inviteCode}
-                      </span>
+                    <form onSubmit={handleSubmitEmailInvite} className="space-y-2.5">
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                        <input
+                          type="email"
+                          value={inviteEmail}
+                          onChange={(e) => setInviteEmail(e.target.value)}
+                          placeholder="អ៊ីមែល Gmail របស់សមាជិក"
+                          required
+                          className="sm:col-span-8 min-h-[40px] px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:border-teal-600 focus:ring-2 focus:ring-teal-600/20"
+                        />
+                        <select
+                          value={inviteRole}
+                          onChange={(e) =>
+                            setInviteRole(e.target.value === 'husband' ? 'husband' : 'wife')
+                          }
+                          aria-label="តួនាទីសមាជិក"
+                          className="sm:col-span-4 min-h-[40px] px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:border-teal-600"
+                        >
+                          <option value="wife">{wifeLabel}</option>
+                          <option value="husband">{husbandLabel}</option>
+                        </select>
+                      </div>
                       <button
-                        type="button"
-                        onClick={() => handleCopyText(cloudMeta.inviteCode, 'code')}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 rounded-md shrink-0"
+                        type="submit"
+                        disabled={inviteBusy || !inviteEmail.trim()}
+                        className="w-full min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors disabled:opacity-50"
                       >
-                        {copiedCode ? (
-                          <>
-                            <Check className="w-3.5 h-3.5" />
-                            បានចម្លង
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-3.5 h-3.5" />
-                            ចម្លងកូដ
-                          </>
-                        )}
+                        <UserPlus className="w-3.5 h-3.5" />
+                        {inviteBusy ? 'កំពុងបន្ថែម...' : 'បន្ថែមអ្នកប្រើប្រាស់'}
                       </button>
-                    </div>
-                  </div>
-                )}
+                      {inviteError && <p className="text-xs text-red-700">{inviteError}</p>}
+                      {inviteSuccess && (
+                        <p className="text-xs text-teal-800 font-medium">{inviteSuccess}</p>
+                      )}
+                    </form>
 
-                {/* Join another spouse's household by invite code */}
-                <form onSubmit={handleSubmitJoin} className="pt-2 border-t border-teal-200/70 space-y-2">
-                  <label
-                    htmlFor="join-household-code"
-                    className="block text-[11px] font-medium text-slate-700"
-                  >
-                    មានលេខកូដគ្រួសារពីឧបករណ៍មួយទៀត? បញ្ចូលដើម្បីភ្ជាប់ទិន្នន័យតែមួយ៖
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      id="join-household-code"
-                      type="text"
-                      value={joinCode}
-                      onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                      placeholder="ឧ. AB12CD34"
-                      maxLength={12}
-                      className="flex-1 min-h-[40px] px-3 py-1.5 text-xs font-mono uppercase bg-white border border-slate-300 rounded-lg focus:border-teal-600 focus:ring-2 focus:ring-teal-600/20"
-                    />
-                    <button
-                      type="submit"
-                      disabled={joinBusy || joinCode.trim().length < 6}
-                      className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap"
-                    >
-                      <Link2 className="w-3.5 h-3.5" />
-                      {joinBusy ? 'កំពុងភ្ជាប់...' : 'ភ្ជាប់គ្រួសារ'}
-                    </button>
+                    {emailInvites.length > 0 && (
+                      <div className="space-y-1.5 pt-2 border-t border-teal-200/70">
+                        <div className="text-[11px] font-medium text-slate-600">
+                          អ៊ីមែលដែលបានអនុញ្ញាត ({emailInvites.length})
+                        </div>
+                        <div className="space-y-1.5">
+                          {emailInvites.map((inv) => (
+                            <div
+                              key={inv.id}
+                              className="flex items-center justify-between gap-2 bg-white border border-teal-200/80 rounded-lg px-2.5 py-1.5"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-xs font-medium text-slate-900 truncate">
+                                  {inv.email}
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  {inv.profileRole === 'husband' ? husbandLabel : wifeLabel}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => void onDeleteEmailInvite(inv.id)}
+                                className="min-h-[32px] min-w-[32px] flex items-center justify-center text-slate-400 hover:text-red-600 rounded-md"
+                                aria-label="ដកសិទ្ធិ"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {cloudMeta?.inviteCode && (
+                      <div className="space-y-1.5 pt-2 border-t border-teal-200/70">
+                        <div className="text-[11px] font-medium text-slate-600">
+                          លេខកូដភ្ជាប់គ្រួសារ ({cloudMeta.memberIds.length} គណនីបានភ្ជាប់)
+                        </div>
+                        <div className="flex items-center justify-between gap-2 bg-white border border-teal-200 rounded-lg px-3 py-2">
+                          <span className="font-mono text-sm font-bold tracking-widest text-slate-900">
+                            {cloudMeta.inviteCode}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyText(cloudMeta.inviteCode, 'code')}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 rounded-md shrink-0"
+                          >
+                            {copiedCode ? (
+                              <>
+                                <Check className="w-3.5 h-3.5" />
+                                បានចម្លង
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3.5 h-3.5" />
+                                ចម្លងកូដ
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  {joinError && (
-                    <p className="text-xs text-red-700">{joinError}</p>
-                  )}
-                  {joinSuccess && (
-                    <p className="text-xs text-teal-800 font-medium">{joinSuccess}</p>
-                  )}
-                </form>
+                ) : (
+                  <p className="text-xs text-slate-700 leading-relaxed">
+                    អ្នកកំពុងប្រើប្រាស់ប្រព័ន្ធគ្រួសាររួមគ្នាតែមួយ។ រាល់ការកត់ត្រា និងការកែប្រែទាំងអស់ត្រូវបានធ្វើសមកាលកម្មភ្លាមៗជាមួយគណនីមេដោយស្វ័យប្រវត្តិ។
+                  </p>
+                )}
 
                 {cloudSyncError && (
                   <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
@@ -311,13 +369,14 @@ export function DriveModal({
                 )}
               </div>
 
-              {/* Section 2: Google Drive File Backup */}
+              {/* Section 2: Google Drive Backup (Master Account ONLY) */}
               <div className="space-y-3 pt-1 border-t border-slate-100">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-slate-700">
-                    ឯកសារបម្រុងទុកលើ Google Drive
+                  <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-teal-700" />
+                    Google Drive (តែគណនីមេមួយប៉ុណ្ណោះ)
                   </span>
-                  {hasDriveToken && (
+                  {isMasterAccount && hasDriveToken && (
                     <button
                       type="button"
                       onClick={onRefreshFile}
@@ -330,16 +389,21 @@ export function DriveModal({
                   )}
                 </div>
 
-                {!hasDriveToken ? (
+                {!isMasterAccount ? (
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs text-slate-600 leading-relaxed">
+                    ការភ្ជាប់ និងបម្រុងទុកលើ Google Drive ត្រូវបានគ្រប់គ្រងដោយ <strong>គណនីមេតែមួយប៉ុណ្ណោះ</strong>។ អ្នកមិនចាំបាច់ភ្ជាប់ Google Drive លើគណនីនេះទេ ព្រោះទិន្នន័យត្រូវបានរក្សាទុកអនឡាញរួមគ្នាស្វ័យប្រវត្តិ។
+                  </div>
+                ) : !hasDriveToken ? (
                   <div className="space-y-2.5">
                     <p className="text-xs text-slate-500 leading-relaxed">
-                      ចង់រក្សាទុកច្បាប់ចម្លងបន្ថែមជាឯកសារ <span className="font-mono">{DRIVE_DATA_FILENAME}</span> ក្នុង Google Drive?
+                      ភ្ជាប់ Google Drive របស់គណនីមេ ដើម្បីរក្សាទុកច្បាប់បម្រុងទុកជាឯកសារ{' '}
+                      <span className="font-mono">{DRIVE_DATA_FILENAME}</span>។
                     </p>
                     <GoogleSignInButton
-                      onClick={onSignIn}
+                      onClick={onConnectMasterDrive}
                       disabled={isBusy}
                       fullWidth
-                      label={isBusy ? 'កំពុងភ្ជាប់...' : 'ភ្ជាប់សិទ្ធិ Google Drive'}
+                      label={isBusy ? 'កំពុងភ្ជាប់...' : 'ភ្ជាប់ Google Drive (គណនីមេ)'}
                     />
                   </div>
                 ) : (
@@ -375,12 +439,12 @@ export function DriveModal({
                         </div>
                         <p className="text-xs text-slate-700 leading-relaxed">
                           {pendingAction === 'save'
-                            ? `ប្រព័ន្ធនឹងរក្សាទុកកំណត់ត្រាចំនួន ${localTxCount} និងវិក្កយបត្រប្រចាំខែ ${localBillCount} ទៅក្នុងឯកសារ "${DRIVE_DATA_FILENAME}" លើ Google Drive របស់អ្នក${
+                            ? `ប្រព័ន្ធនឹងរក្សាទុកកំណត់ត្រាចំនួន ${localTxCount} និងវិក្កយបត្រប្រចាំខែ ${localBillCount} ទៅក្នុងឯកសារ "${DRIVE_DATA_FILENAME}" លើ Google Drive របស់គណនីមេ${
                                 driveFile ? ' (ជំនួសទិន្នន័យចាស់ក្នុងឯកសារនោះ)' : ''
                               }។`
                             : pendingAction === 'load'
-                            ? `ទិន្នន័យពីឯកសារ "${DRIVE_DATA_FILENAME}" នឹងត្រូវបានទាញយកមកជំនួសទិន្នន័យបច្ចុប្បន្ននៅលើគណនីគ្រួសារនេះ។`
-                            : `ឯកសារ "${DRIVE_DATA_FILENAME}" នឹងត្រូវបានលុបចេញពី Google Drive របស់អ្នកជាអចិន្ត្រៃយ៍ (ទិន្នន័យអនឡាញនៅរក្សាដដែល)។`}
+                            ? `ទិន្នន័យពីឯកសារ "${DRIVE_DATA_FILENAME}" នឹងត្រូវបានទាញយកមកជំនួសទិន្នន័យបច្ចុប្បន្ននៅលើប្រព័ន្ធគ្រួសារនេះ។`
+                            : `ឯកសារ "${DRIVE_DATA_FILENAME}" នឹងត្រូវបានលុបចេញពី Google Drive របស់គណនីមេជាអចិន្ត្រៃយ៍ (ទិន្នន័យអនឡាញនៅរក្សាដដែល)។`}
                         </p>
                         <div className="flex items-center justify-end gap-2 pt-1">
                           <button
@@ -445,6 +509,17 @@ export function DriveModal({
                   </div>
                 )}
               </div>
+
+              <div className="pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={onExportLocalBackup}
+                  className="w-full min-h-[42px] flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-colors"
+                >
+                  <Download className="w-4 h-4 shrink-0" />
+                  ទាញយកឯកសារបម្រុងទុក (JSON)
+                </button>
+              </div>
             </div>
           )}
 
@@ -455,7 +530,7 @@ export function DriveModal({
               {isUnauthorizedDomain && currentHost && (
                 <div className="pt-2.5 border-t border-red-200/80 space-y-2 text-xs text-slate-700">
                   <div className="font-semibold text-slate-900">
-                    របៀបបើកសិទ្ធិចូលគណនី Google សម្រាប់គេហទំព័រនេះ (ប្រើពេល ១ នាទី)៖
+                    របៀបបើកសិទ្ធិចូលគណនី Google សម្រាប់គេហទំព័រនេះ៖
                   </div>
                   <ol className="list-decimal pl-4 space-y-1 leading-relaxed">
                     <li>
@@ -491,22 +566,6 @@ export function DriveModal({
                   </div>
                 </div>
               )}
-            </div>
-          )}
-
-          {!googleUser && (
-            <div className="pt-3 border-t border-slate-100 space-y-2">
-              <div className="text-xs text-slate-500 leading-relaxed">
-                ជម្រើសរក្សាទុកបន្ទាន់៖ ទាញយកឯកសារ JSON ទុកក្នុងម៉ាស៊ីន។
-              </div>
-              <button
-                type="button"
-                onClick={onExportLocalBackup}
-                className="w-full min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-colors"
-              >
-                <Download className="w-4 h-4 shrink-0" />
-                ទាញយកឯកសារបម្រុងទុក (JSON)
-              </button>
             </div>
           )}
 

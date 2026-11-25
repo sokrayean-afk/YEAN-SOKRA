@@ -12,24 +12,41 @@ import {
 
 export { getFirebaseProjectId };
 
+export const MASTER_ADMIN_EMAIL = 'sokrayean@gmail.com';
 export const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 
+export function isMasterEmail(email?: string | null): boolean {
+  return typeof email === 'string' && email.trim().toLowerCase() === MASTER_ADMIN_EMAIL;
+}
+
 let isSigningIn = false;
-// In-memory only access token cache (never stored in localStorage/sessionStorage)
+// In-memory only access token cache for Master Google Drive backup (never stored in localStorage/sessionStorage)
 let cachedAccessToken: string | null = null;
-// Forces Google consent screen on next sign-in if Drive scope was missing/revoked
+// Forces Google consent screen on next Drive connect if Drive scope was missing/revoked
 let needsConsentPrompt = false;
 
-function buildGoogleProvider(forceConsent: boolean): GoogleAuthProvider {
+function buildBasicGoogleProvider(): GoogleAuthProvider {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  return provider;
+}
+
+function buildDriveGoogleProvider(
+  forceConsent: boolean,
+  loginHint?: string
+): GoogleAuthProvider {
   const provider = new GoogleAuthProvider();
   for (const scope of SCOPES) {
     provider.addScope(scope);
   }
-  provider.setCustomParameters(
-    forceConsent
-      ? { prompt: 'consent select_account', include_granted_scopes: 'true' }
-      : { prompt: 'select_account', include_granted_scopes: 'true' }
-  );
+  const params: Record<string, string> = {
+    prompt: forceConsent ? 'consent select_account' : 'select_account',
+    include_granted_scopes: 'true',
+  };
+  if (loginHint) {
+    params.login_hint = loginHint;
+  }
+  provider.setCustomParameters(params);
   return provider;
 }
 
@@ -111,8 +128,37 @@ export function initGoogleAuth(
   });
 }
 
+/**
+ * Standard Google Sign-In for all system users (Master & Spouse).
+ * Does NOT request Google Drive scopes — Drive is connected exclusively on the Master Account.
+ */
+export async function signInWithGoogleOnly(): Promise<User> {
+  const auth = getFirebaseAuthSafe();
+  if (!auth) {
+    throw (
+      getFirebaseInitError() ||
+      new Error('មិនអាចចាប់ផ្តើមសេវាកម្មចូលគណនី Google បានទេ។')
+    );
+  }
+  try {
+    isSigningIn = true;
+    const provider = buildBasicGoogleProvider();
+    const result = await signInWithPopup(auth, provider);
+    return result.user;
+  } catch (error: unknown) {
+    throw mapFirebaseAuthError(error);
+  } finally {
+    isSigningIn = false;
+  }
+}
+
+/**
+ * Master-only Google Drive connection requesting drive.file scope.
+ * Stores access token strictly in memory.
+ */
 export async function signInWithGoogleDrive(
-  forceConsent = false
+  forceConsent = false,
+  loginHint?: string
 ): Promise<{
   user: User;
   accessToken: string | null;
@@ -126,7 +172,10 @@ export async function signInWithGoogleDrive(
   }
   try {
     isSigningIn = true;
-    const provider = buildGoogleProvider(forceConsent || needsConsentPrompt);
+    const provider = buildDriveGoogleProvider(
+      forceConsent || needsConsentPrompt,
+      loginHint
+    );
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     cachedAccessToken = credential?.accessToken || null;

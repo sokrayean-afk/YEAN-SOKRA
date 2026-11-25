@@ -11,6 +11,7 @@ import { BillModal } from './components/BillModal';
 import { BudgetsCycleView } from './components/BudgetsCycleView';
 import { DriveModal } from './components/DriveModal';
 import { LedgerView } from './components/LedgerView';
+import { LoginScreen } from './components/LoginScreen';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { NotificationsModal } from './components/NotificationsModal';
 import { OverviewView } from './components/OverviewView';
@@ -27,8 +28,10 @@ import {
   getCachedAccessToken,
   GoogleAuthError,
   initGoogleAuth,
+  isMasterEmail,
   markNeedsConsentPrompt,
   signInWithGoogleDrive,
+  signInWithGoogleOnly,
   signOutGoogle,
 } from './services/googleAuth';
 import {
@@ -40,18 +43,22 @@ import {
   type DriveFileMeta,
 } from './services/googleDrive';
 import {
+  addEmailInviteInCloud,
   createBillInCloud,
   createTransactionInCloud,
   deleteBillFromCloud,
+  deleteEmailInviteFromCloud,
   deleteTransactionFromCloud,
-  ensureUserHousehold,
   joinHouseholdByInviteCode,
   replaceAllHouseholdDataInCloud,
+  resolveUserHousehold,
+  subscribeEmailInvites,
   subscribeHousehold,
   updateBillInCloud,
   updateHouseholdSettingsInCloud,
   updateTransactionInCloud,
   type CloudHouseholdMeta,
+  type HouseholdEmailInvite,
 } from './services/householdSync';
 import type {
   ActiveUser,
@@ -73,8 +80,25 @@ import {
 } from './utils/notifications';
 
 const STORAGE_KEY = 'kh_household_finance_v1';
+const DEVICE_USER_KEY = 'kh_household_device_user';
 const SNOOZE_KEY = 'kh_household_snooze_date';
 const BROWSER_NOTIFIED_KEY = 'kh_household_browser_notified_date';
+
+function loadDeviceActiveUser(): ActiveUser {
+  try {
+    return localStorage.getItem(DEVICE_USER_KEY) === 'wife' ? 'wife' : 'husband';
+  } catch {
+    return 'husband';
+  }
+}
+
+function saveDeviceActiveUser(user: ActiveUser): void {
+  try {
+    localStorage.setItem(DEVICE_USER_KEY, user);
+  } catch {
+    // Ignore storage error
+  }
+}
 
 interface StoredState {
   transactions: Transaction[];
@@ -258,7 +282,13 @@ export default function App() {
   const [initial] = useState<StoredState>(() => loadInitialState());
   const [transactions, setTransactions] = useState<Transaction[]>(initial.transactions);
   const [bills, setBills] = useState<RecurringBill[]>(initial.bills);
-  const [settings, setSettings] = useState<HouseholdSettings>(initial.settings);
+  const [deviceActiveUser, setDeviceActiveUser] = useState<ActiveUser>(() =>
+    loadDeviceActiveUser()
+  );
+  const [settings, setSettings] = useState<HouseholdSettings>(() => ({
+    ...initial.settings,
+    activeUser: loadDeviceActiveUser(),
+  }));
 
   const [activeTab, setActiveTab] = useState<ViewTab>('overview');
   const [cycleOffset, setCycleOffset] = useState<number>(0);
@@ -280,10 +310,14 @@ export default function App() {
     }
   });
 
-  // Google Auth, Real-Time Online Cloud Sync (Firestore), and Drive Backup State
+  // Google Auth, Real-Time Online Single-System Sync (Firestore), and Master-Only Drive State
+  const [authReady, setAuthReady] = useState(false);
   const [googleUser, setGoogleUser] = useState<User | null>(null);
   const [activeHouseholdId, setActiveHouseholdId] = useState<string | null>(null);
+  const [needsInvite, setNeedsInvite] = useState(false);
+  const [resolveNonce, setResolveNonce] = useState(0);
   const [cloudMeta, setCloudMeta] = useState<CloudHouseholdMeta | null>(null);
+  const [emailInvites, setEmailInvites] = useState<HouseholdEmailInvite[]>([]);
   const [cloudSyncStatus, setCloudSyncStatus] = useState<
     'offline' | 'connecting' | 'synced' | 'error'
   >('offline');
@@ -296,8 +330,16 @@ export default function App() {
   const [driveErrorCode, setDriveErrorCode] = useState('');
   const [driveSuccess, setDriveSuccess] = useState('');
 
+  const isMasterAccount = Boolean(
+    googleUser &&
+      (isMasterEmail(googleUser.email) ||
+        (cloudMeta && cloudMeta.ownerId === googleUser.uid))
+  );
+
   const latestLocalRef = useRef<StoredState>({ transactions, bills, settings });
   latestLocalRef.current = { transactions, bills, settings };
+  const deviceActiveUserRef = useRef<ActiveUser>(deviceActiveUser);
+  deviceActiveUserRef.current = deviceActiveUser;
   const settingsSyncTimerRef = useRef<number | null>(null);
 
   // Persist locally so offline/mobile usage is always instant
@@ -354,35 +396,51 @@ export default function App() {
     [handleDriveError]
   );
 
-  // Initialize Firebase Auth listener (persists across reloads for real-time Cloud Sync)
+  // Initialize Firebase Auth listener (persists across reloads for single-system login)
   useEffect(() => {
     const unsubscribe = initGoogleAuth((user, driveToken) => {
+      setAuthReady(true);
       setGoogleUser(user);
-      setHasDriveToken(Boolean(driveToken));
-      if (user && driveToken) {
+      const isMaster = Boolean(user && isMasterEmail(user.email));
+      setHasDriveToken(Boolean(isMaster && driveToken));
+      if (user && isMaster && driveToken) {
         void refreshDriveFileMeta(driveToken);
       }
       if (!user) {
         setActiveHouseholdId(null);
+        setNeedsInvite(false);
         setCloudMeta(null);
+        setEmailInvites([]);
         setCloudSyncStatus('offline');
         setCloudSyncError('');
+        setDriveFile(null);
       }
     });
     return () => unsubscribe();
   }, [refreshDriveFileMeta]);
 
-  // Provision or resolve the user's shared household in Firestore on sign-in
+  // Resolve single-system household access for signed-in user (Master or pre-authorized Member)
   useEffect(() => {
     if (!googleUser) return;
     let cancelled = false;
     setCloudSyncStatus('connecting');
     setCloudSyncError('');
 
-    void ensureUserHousehold(googleUser, latestLocalRef.current)
-      .then((hhId) => {
-        if (!cancelled) {
-          setActiveHouseholdId(hhId);
+    void resolveUserHousehold(googleUser, latestLocalRef.current)
+      .then((res) => {
+        if (cancelled) return;
+        if (res.status === 'ready') {
+          setNeedsInvite(false);
+          setActiveHouseholdId(res.householdId);
+          if (res.assignedProfileRole) {
+            setDeviceActiveUser(res.assignedProfileRole);
+            saveDeviceActiveUser(res.assignedProfileRole);
+            setSettings((prev) => ({ ...prev, activeUser: res.assignedProfileRole! }));
+          }
+        } else {
+          setActiveHouseholdId(null);
+          setNeedsInvite(true);
+          setCloudSyncStatus('offline');
         }
       })
       .catch((err: unknown) => {
@@ -399,9 +457,9 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [googleUser]);
+  }, [googleUser, resolveNonce]);
 
-  // Live real-time Firestore subscription across all devices
+  // Live real-time Firestore subscription across all devices in the single household
   useEffect(() => {
     if (!googleUser || !activeHouseholdId) return;
     setCloudSyncStatus('connecting');
@@ -410,7 +468,11 @@ export default function App() {
     const unsubscribe = subscribeHousehold(activeHouseholdId, googleUser.uid, {
       onHouseholdMeta: (meta) => {
         setCloudMeta(meta);
-        setSettings(meta.settings);
+        // Preserve per-device Husband/Wife active recorder selection
+        setSettings({
+          ...meta.settings,
+          activeUser: deviceActiveUserRef.current,
+        });
         setCloudSyncStatus('synced');
         setCloudSyncError('');
       },
@@ -431,25 +493,66 @@ export default function App() {
     return () => unsubscribe();
   }, [googleUser, activeHouseholdId]);
 
-  const handleGoogleSignIn = async () => {
+  // Master-only: Subscribe to authorized household member email invites
+  useEffect(() => {
+    if (!googleUser || !isMasterAccount) {
+      setEmailInvites([]);
+      return;
+    }
+    const unsub = subscribeEmailInvites(
+      googleUser.uid,
+      (list) => setEmailInvites(list),
+      () => {
+        // Non-fatal
+      }
+    );
+    return () => unsub();
+  }, [googleUser, isMasterAccount]);
+
+  // Standard Google Login (no Google Drive scope requested — Drive is Master-only)
+  const handleGoogleLogin = async () => {
     setDriveBusy(true);
     setDriveError('');
     setDriveErrorCode('');
     setDriveSuccess('');
     try {
-      const result = await signInWithGoogleDrive();
+      const user = await signInWithGoogleOnly();
+      setGoogleUser(user);
+    } catch (err: unknown) {
+      handleDriveError(err, 'ការចូលគណនី Google មិនបានជោគជ័យទេ។');
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  // Master-only: Connect Google Drive with drive.file scope
+  const handleConnectMasterDrive = async () => {
+    if (!googleUser || !isMasterAccount) {
+      setDriveError('មានតែគណនីមេមួយប៉ុណ្ណោះដែលអាចភ្ជាប់ Google Drive បាន។');
+      return;
+    }
+    setDriveBusy(true);
+    setDriveError('');
+    setDriveErrorCode('');
+    setDriveSuccess('');
+    try {
+      const result = await signInWithGoogleDrive(true, googleUser.email || undefined);
       setGoogleUser(result.user);
+      if (!isMasterEmail(result.user.email)) {
+        clearCachedAccessToken();
+        setHasDriveToken(false);
+        setDriveError('សូមជ្រើសរើសគណនីមេដើម្បីភ្ជាប់ Google Drive។');
+        return;
+      }
       setHasDriveToken(Boolean(result.accessToken));
       if (result.accessToken) {
         const ok = await refreshDriveFileMeta(result.accessToken);
         if (ok) {
-          setDriveSuccess('បានភ្ជាប់អនឡាញ និង Google Drive ដោយជោគជ័យ។');
+          setDriveSuccess('បានភ្ជាប់ Google Drive លើគណនីមេដោយជោគជ័យ។');
         }
-      } else {
-        setDriveSuccess('បានភ្ជាប់គណនីអនឡាញគ្រប់ឧបករណ៍ដោយជោគជ័យ។');
       }
     } catch (err: unknown) {
-      handleDriveError(err, 'ការចូលគណនី Google មិនបានជោគជ័យទេ។');
+      handleDriveError(err, 'មិនអាចភ្ជាប់ Google Drive បានទេ។');
     } finally {
       setDriveBusy(false);
     }
@@ -463,11 +566,14 @@ export default function App() {
       await signOutGoogle();
       setGoogleUser(null);
       setActiveHouseholdId(null);
+      setNeedsInvite(false);
       setCloudMeta(null);
+      setEmailInvites([]);
       setCloudSyncStatus('offline');
       setCloudSyncError('');
       setHasDriveToken(false);
       setDriveFile(null);
+      setDriveModalOpen(false);
     } finally {
       setDriveBusy(false);
     }
@@ -478,14 +584,42 @@ export default function App() {
       throw new Error('សូមចូលគណនី Google ជាមុនសិន។');
     }
     const joinedId = await joinHouseholdByInviteCode(googleUser, inviteCode);
+    setNeedsInvite(false);
     setActiveHouseholdId(joinedId);
   };
 
+  const handleAddEmailInvite = async (email: string, profileRole: ActiveUser) => {
+    if (!googleUser || !isMasterAccount || !cloudMeta) {
+      throw new Error('មានតែគណនីមេប៉ុណ្ណោះដែលអាចបន្ថែមអ្នកប្រើប្រាស់បាន។');
+    }
+    const displayLabel =
+      profileRole === 'husband'
+        ? settings.husbandName.trim() || 'ប្តី'
+        : settings.wifeName.trim() || 'ប្រពន្ធ';
+    await addEmailInviteInCloud({
+      email,
+      householdId: cloudMeta.householdId,
+      ownerId: googleUser.uid,
+      inviteCode: cloudMeta.inviteCode,
+      profileRole,
+      displayLabel,
+    });
+  };
+
+  const handleDeleteEmailInvite = async (inviteId: string) => {
+    if (!isMasterAccount) return;
+    await deleteEmailInviteFromCloud(inviteId);
+  };
+
   const handleConfirmSaveToDrive = async () => {
+    if (!isMasterAccount) {
+      setDriveError('មានតែគណនីមេប៉ុណ្ណោះដែលអាចបម្រុងទុកទៅ Google Drive បាន។');
+      return;
+    }
     const token = getCachedAccessToken();
     if (!token) {
       setHasDriveToken(false);
-      setDriveError('សូមចូលគណនី Google ម្តងទៀតដើម្បីរក្សាទុក។');
+      setDriveError('សូមភ្ជាប់ Google Drive (គណនីមេ) ម្តងទៀតដើម្បីរក្សាទុក។');
       return;
     }
     setDriveBusy(true);
@@ -495,7 +629,7 @@ export default function App() {
       const payload: StoredState = { transactions, bills, settings };
       const saved = await saveDataToDrive(token, payload, driveFile?.id);
       setDriveFile(saved);
-      setDriveSuccess('បានរក្សាទុកទិន្នន័យទៅក្នុង Google Drive ដោយជោគជ័យ។');
+      setDriveSuccess('បានរក្សាទុកទិន្នន័យទៅក្នុង Google Drive របស់គណនីមេដោយជោគជ័យ។');
     } catch (err: unknown) {
       handleDriveError(err, 'មិនអាចរក្សាទុកទៅ Google Drive បានទេ។');
     } finally {
@@ -504,6 +638,10 @@ export default function App() {
   };
 
   const handleConfirmLoadFromDrive = async () => {
+    if (!isMasterAccount) {
+      setDriveError('មានតែគណនីមេប៉ុណ្ណោះដែលអាចទាញយកពី Google Drive បាន។');
+      return;
+    }
     const token = getCachedAccessToken();
     if (!token || !driveFile) {
       setDriveError('មិនមានឯកសារ ឬសិទ្ធិចូលប្រើ Google Drive ទេ។');
@@ -519,7 +657,9 @@ export default function App() {
       }
       const nextTransactions = normalizeTransactions(loaded.transactions);
       const nextBills = normalizeBills(loaded.bills);
-      const nextSettings = loaded.settings ? normalizeSettings(loaded.settings) : settings;
+      const nextSettings = loaded.settings
+        ? { ...normalizeSettings(loaded.settings), activeUser: deviceActiveUserRef.current }
+        : settings;
       setTransactions(nextTransactions);
       setBills(nextBills);
       setSettings(nextSettings);
@@ -550,6 +690,7 @@ export default function App() {
   };
 
   const handleConfirmDeleteDriveFile = async () => {
+    if (!isMasterAccount) return;
     const token = getCachedAccessToken();
     if (!token || !driveFile) return;
     setDriveBusy(true);
@@ -641,7 +782,9 @@ export default function App() {
   }, [previousCycleTransactions, userViewFilter]);
 
   const handleActiveUserChange = (user: ActiveUser) => {
-    handleUpdateSettings({ activeUser: user });
+    setDeviceActiveUser(user);
+    saveDeviceActiveUser(user);
+    setSettings((prev) => ({ ...prev, activeUser: user }));
   };
 
   const getActiveMemberIds = (): string[] => {
@@ -938,6 +1081,25 @@ export default function App() {
     });
   };
 
+  // Dedicated Login Gate for Single Shared System
+  if (!authReady || !googleUser || needsInvite || !activeHouseholdId) {
+    return (
+      <LoginScreen
+        authReady={authReady}
+        googleUser={googleUser}
+        needsInvite={needsInvite}
+        isBusy={driveBusy}
+        isConnectingCloud={cloudSyncStatus === 'connecting'}
+        errorMsg={driveError || cloudSyncError}
+        errorCode={driveErrorCode}
+        onSignIn={handleGoogleLogin}
+        onSignOut={handleGoogleSignOut}
+        onJoinByCode={handleJoinHousehold}
+        onRetryAccess={() => setResolveNonce((n) => n + 1)}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen flex bg-slate-50 text-slate-900">
       {/* Desktop Sidebar */}
@@ -949,12 +1111,14 @@ export default function App() {
         onActiveUserChange={handleActiveUserChange}
         onCurrencyChange={(c) => handleUpdateSettings({ displayCurrency: c })}
         googleUser={googleUser}
+        isMasterAccount={isMasterAccount}
         hasDriveToken={hasDriveToken}
         onOpenDriveModal={() => {
           setDriveError('');
           setDriveSuccess('');
           setDriveModalOpen(true);
         }}
+        onSignOut={handleGoogleSignOut}
         reminderCount={billNotifications.length}
         onOpenNotifications={() => setNotificationsModalOpen(true)}
       />
@@ -1101,11 +1265,13 @@ export default function App() {
             <BudgetsCycleView
               settings={settings}
               onUpdateSettings={handleUpdateSettings}
+              onActiveUserChange={handleActiveUserChange}
               activeCycle={activeCycle}
               cycleTransactions={cycleTransactions}
               categories={DEFAULT_CATEGORIES}
               bills={bills}
               googleUser={googleUser}
+              isMasterAccount={isMasterAccount}
               cloudInviteCode={cloudMeta?.inviteCode}
               cloudMemberCount={cloudMeta?.memberIds.length}
               hasDriveToken={hasDriveToken}
@@ -1113,7 +1279,7 @@ export default function App() {
               driveBusy={driveBusy}
               driveError={driveError}
               driveSuccess={driveSuccess}
-              onSignInGoogle={handleGoogleSignIn}
+              onConnectMasterDrive={handleConnectMasterDrive}
               onOpenDriveModal={() => {
                 setDriveSuccess('');
                 setDriveModalOpen(true);
@@ -1188,9 +1354,11 @@ export default function App() {
         isOpen={driveModalOpen}
         onClose={() => setDriveModalOpen(false)}
         googleUser={googleUser}
+        isMasterAccount={isMasterAccount}
         cloudMeta={cloudMeta}
         cloudSyncStatus={cloudSyncStatus}
         cloudSyncError={cloudSyncError}
+        emailInvites={emailInvites}
         hasDriveToken={hasDriveToken}
         driveFile={driveFile}
         isBusy={driveBusy}
@@ -1199,9 +1367,12 @@ export default function App() {
         successMsg={driveSuccess}
         localTxCount={transactions.length}
         localBillCount={bills.length}
-        onSignIn={handleGoogleSignIn}
+        husbandName={settings.husbandName}
+        wifeName={settings.wifeName}
+        onConnectMasterDrive={handleConnectMasterDrive}
         onSignOut={handleGoogleSignOut}
-        onJoinHousehold={handleJoinHousehold}
+        onAddEmailInvite={handleAddEmailInvite}
+        onDeleteEmailInvite={handleDeleteEmailInvite}
         onRefreshFile={async () => {
           await refreshDriveFileMeta();
         }}

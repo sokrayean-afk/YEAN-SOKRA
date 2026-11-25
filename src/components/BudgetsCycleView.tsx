@@ -14,6 +14,7 @@ import {
 import { useRef, useState } from 'react';
 import type { DriveFileMeta } from '../services/googleDrive';
 import type {
+  ActiveUser,
   Category,
   CycleRange,
   HouseholdSettings,
@@ -30,16 +31,17 @@ import {
   getTodayIso,
 } from '../utils/cycle';
 import { formatMoney, PAYMENT_METHOD_LABELS } from '../utils/format';
-import { GoogleSignInButton } from './GoogleSignInButton';
 
 interface BudgetsCycleViewProps {
   settings: HouseholdSettings;
   onUpdateSettings: (next: Partial<HouseholdSettings>) => void;
+  onActiveUserChange: (user: ActiveUser) => void;
   activeCycle: CycleRange;
   cycleTransactions: Transaction[];
   categories: Category[];
   bills: RecurringBill[];
   googleUser: User | null;
+  isMasterAccount: boolean;
   cloudInviteCode?: string;
   cloudMemberCount?: number;
   hasDriveToken: boolean;
@@ -47,7 +49,7 @@ interface BudgetsCycleViewProps {
   driveBusy: boolean;
   driveError: string;
   driveSuccess: string;
-  onSignInGoogle: () => Promise<void>;
+  onConnectMasterDrive: () => Promise<void>;
   onOpenDriveModal: () => void;
   reminderCount: number;
   onOpenNotifications: () => void;
@@ -66,11 +68,13 @@ const PRESET_DAYS = [1, 5, 10, 15, 25, 28];
 export function BudgetsCycleView({
   settings,
   onUpdateSettings,
+  onActiveUserChange,
   activeCycle,
   cycleTransactions,
   categories,
   bills,
   googleUser,
+  isMasterAccount,
   cloudInviteCode,
   cloudMemberCount,
   hasDriveToken,
@@ -78,7 +82,7 @@ export function BudgetsCycleView({
   driveBusy,
   driveError,
   driveSuccess,
-  onSignInGoogle,
+  onConnectMasterDrive,
   onOpenDriveModal,
   reminderCount,
   onOpenNotifications,
@@ -194,7 +198,7 @@ export function BudgetsCycleView({
           <div className="inline-flex items-center p-1 bg-slate-100 rounded-xl shrink-0">
             <button
               type="button"
-              onClick={() => onUpdateSettings({ activeUser: 'husband' })}
+              onClick={() => onActiveUserChange('husband')}
               className={`min-h-[42px] px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-lg transition-colors whitespace-nowrap ${
                 settings.activeUser === 'husband'
                   ? 'bg-white text-teal-800 shadow-xs'
@@ -205,7 +209,7 @@ export function BudgetsCycleView({
             </button>
             <button
               type="button"
-              onClick={() => onUpdateSettings({ activeUser: 'wife' })}
+              onClick={() => onActiveUserChange('wife')}
               className={`min-h-[42px] px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-lg transition-colors whitespace-nowrap ${
                 settings.activeUser === 'wife'
                   ? 'bg-white text-teal-800 shadow-xs'
@@ -248,47 +252,50 @@ export function BudgetsCycleView({
         </div>
       </section>
 
-      {/* 1. Online Multi-Device Cloud Sync & Google Drive Card */}
+      {/* 1. Single-System Account & Master-Only Google Drive Card */}
       <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <Cloud className="w-5 h-5 text-teal-700 shrink-0" />
               <h2 className="text-base font-semibold text-slate-900">
-                សមកាលកម្មអនឡាញគ្រប់ឧបករណ៍ និង Google Drive
+                {isMasterAccount
+                  ? 'គ្រប់គ្រងអ្នកប្រើប្រព័ន្ធតែមួយ និង Google Drive (គណនីមេ)'
+                  : 'គណនីសមាជិកប្រព័ន្ធគ្រួសារតែមួយ'}
               </h2>
             </div>
             <p className="text-xs sm:text-sm text-slate-500">
-              {googleUser
-                ? `បានភ្ជាប់អនឡាញជាមួយ ${googleUser.email || 'គណនី Google'}${
+              {isMasterAccount
+                ? `គណនីមេ៖ ${googleUser?.email || ''}${
                     cloudInviteCode ? ` · កូដគ្រួសារ៖ ${cloudInviteCode}` : ''
                   }${
                     cloudMemberCount && cloudMemberCount > 1
-                      ? ` (${cloudMemberCount} គណនី)`
+                      ? ` (${cloudMemberCount} គណនីបានភ្ជាប់)`
                       : ''
-                  }${driveFile ? ' · មានឯកសារលើ Drive' : ''}`
-                : 'ចូលគណនី Google ដើម្បីរក្សាទុកអនឡាញ និងប្រើទិន្នន័យគ្រួសារតែមួយលើគ្រប់ទូរស័ព្ទ និងកុំព្យូទ័រ។'}
+                  }${driveFile ? ' · មានឯកសារលើ Google Drive' : ''}`
+                : `កំពុងប្រើប្រព័ន្ធរួមគ្នាជាមួយគណនីមេ (${googleUser?.email || ''}) · ការភ្ជាប់ Google Drive គ្រប់គ្រងដោយគណនីមេតែមួយប៉ុណ្ណោះ។`}
             </p>
           </div>
 
-          <div className="shrink-0">
-            {googleUser ? (
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {isMasterAccount && !hasDriveToken && (
               <button
                 type="button"
-                onClick={onOpenDriveModal}
+                onClick={() => void onConnectMasterDrive()}
                 disabled={driveBusy}
-                className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-sm font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-xl transition-colors whitespace-nowrap disabled:opacity-50"
+                className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-xs sm:text-sm font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-xl transition-colors whitespace-nowrap disabled:opacity-50"
               >
-                គ្រប់គ្រងអនឡាញ និង Google Drive
+                {driveBusy ? 'កំពុងភ្ជាប់...' : 'ភ្ជាប់ Google Drive (គណនីមេ)'}
               </button>
-            ) : (
-              <GoogleSignInButton
-                onClick={onSignInGoogle}
-                disabled={driveBusy}
-                label={driveBusy ? 'កំពុងភ្ជាប់...' : 'ចូលគណនីជាមួយ Google'}
-                fullWidth
-              />
             )}
+            <button
+              type="button"
+              onClick={onOpenDriveModal}
+              disabled={driveBusy}
+              className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-xs sm:text-sm font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-xl transition-colors whitespace-nowrap disabled:opacity-50"
+            >
+              {isMasterAccount ? 'គ្រប់គ្រងអ្នកប្រើ និង Drive' : 'មើលគណនីប្រព័ន្ធ'}
+            </button>
           </div>
         </div>
 

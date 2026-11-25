@@ -21,6 +21,13 @@ service cloud.firestore {
       return d is string && d.size() == 10 && d.matches('^\\d{4}-\\d{2}-\\d{2}$');
     }
 
+    function isValidEmail(val) {
+      return val is string
+        && val.size() >= 3
+        && val.size() <= 254
+        && val.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -31,6 +38,13 @@ service cloud.firestore {
 
     function isSignedIn() {
       return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    // Bootstrapped Master Admin account (strictly requires verified email)
+    function isAdmin() {
+      return isSignedIn()
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'sokrayean@gmail.com';
     }
 
     function isValidMemberIds(listVal) {
@@ -77,6 +91,40 @@ service cloud.firestore {
         && isValidId(data.householdId)
         && isValidId(data.ownerId)
         && data.ownerId == request.auth.uid
+        && data.createdAt is timestamp;
+    }
+
+    function isValidHouseholdEmailInvite(data, inviteId) {
+      return data.keys().hasAll([
+          'id',
+          'email',
+          'householdId',
+          'ownerId',
+          'inviteCode',
+          'profileRole',
+          'displayLabel',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'email',
+          'householdId',
+          'ownerId',
+          'inviteCode',
+          'profileRole',
+          'displayLabel',
+          'createdAt'
+        ])
+        && data.id == inviteId
+        && isValidId(data.id)
+        && isValidEmail(data.email)
+        && data.email == data.email.lower()
+        && isValidId(data.householdId)
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidInviteCode(data.inviteCode)
+        && data.profileRole is string && (data.profileRole == 'husband' || data.profileRole == 'wife')
+        && data.displayLabel is string && data.displayLabel.size() <= 60
         && data.createdAt is timestamp;
     }
 
@@ -301,17 +349,43 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if isSignedIn()
         && isValidInviteCode(inviteCode)
-        && existing().ownerId == request.auth.uid;
+        && (existing().ownerId == request.auth.uid || isAdmin());
     }
 
-    // 6. Households Master Document
+    // 5b. Master-Managed Authorized Email Invites (strict PII isolation: only owner or matching verified email)
+    match /householdEmailInvites/{inviteId} {
+      allow get: if isSignedIn()
+        && isValidId(inviteId)
+        && (
+          (request.auth.token.email is string && existing().email == request.auth.token.email.lower())
+          || existing().ownerId == request.auth.uid
+          || isAdmin()
+        );
+      allow list: if isSignedIn()
+        && (
+          (request.auth.token.email is string && existing().email == request.auth.token.email.lower())
+          || existing().ownerId == request.auth.uid
+        );
+      allow create: if isSignedIn()
+        && isValidId(inviteId)
+        && isValidHouseholdEmailInvite(incoming(), inviteId)
+        && incoming().createdAt == request.time
+        && get(/databases/$(database)/documents/households/$(incoming().householdId)).data.ownerId == request.auth.uid
+        && get(/databases/$(database)/documents/households/$(incoming().householdId)).data.inviteCode == incoming().inviteCode;
+      allow update: if false;
+      allow delete: if isSignedIn()
+        && isValidId(inviteId)
+        && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 6. Households Master Document (Single System created by Master Admin)
     match /households/{householdId} {
       allow get: if isSignedIn()
         && isValidId(householdId)
-        && (request.auth.uid in existing().memberIds || isHouseholdMember(householdId));
+        && (request.auth.uid in existing().memberIds || isHouseholdMember(householdId) || isAdmin());
       allow list: if isSignedIn()
         && request.auth.uid in existing().memberIds;
-      allow create: if isSignedIn()
+      allow create: if isAdmin()
         && isValidId(householdId)
         && isValidHousehold(incoming())
         && incoming().ownerId == request.auth.uid
@@ -330,7 +404,7 @@ service cloud.firestore {
         && (
           // Action 1: Member updates household settings
           (
-            isHouseholdMember(householdId)
+            (isHouseholdMember(householdId) || isAdmin())
             && incoming().memberIds == existing().memberIds
             && incoming().inviteCode == existing().inviteCode
             && incoming().diff(existing()).affectedKeys().hasOnly([
@@ -363,6 +437,16 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
             && getAfter(/databases/$(database)/documents/households/$(householdId)/members/$(request.auth.uid)).data.role == 'member'
           )
+          ||
+          // Action 3: Master owner removes a non-owner member UID from memberIds
+          (
+            (isHouseholdOwner(householdId) || isAdmin())
+            && existing().ownerId in incoming().memberIds
+            && incoming().memberIds.size() < existing().memberIds.size()
+            && existing().memberIds.hasAll(incoming().memberIds)
+            && incoming().inviteCode == existing().inviteCode
+            && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
+          )
         );
       allow delete: if false;
 
@@ -371,7 +455,7 @@ service cloud.firestore {
         allow get: if isSignedIn()
           && isValidId(householdId)
           && isValidId(memberUid)
-          && (request.auth.uid == memberUid || isHouseholdMember(householdId));
+          && (request.auth.uid == memberUid || isHouseholdMember(householdId) || isAdmin());
         allow list: if isSignedIn()
           && existing().uid == request.auth.uid;
         allow create: if isSignedIn()
@@ -380,14 +464,15 @@ service cloud.firestore {
           && isValidHouseholdMember(incoming(), householdId, memberUid)
           && incoming().joinedAt == request.time
           && (
-            // Owner creating own membership atomically with household
+            // Master owner creating own membership atomically with household
             (
-              incoming().role == 'owner'
+              isAdmin()
+              && incoming().role == 'owner'
               && getAfter(/databases/$(database)/documents/households/$(householdId)).data.ownerId == request.auth.uid
               && getAfter(/databases/$(database)/documents/households/$(householdId)).data.inviteCode == incoming().inviteCode
             )
             ||
-            // Spouse joining as member with valid invite code
+            // Authorized household member joining with valid invite code
             (
               incoming().role == 'member'
               && exists(/databases/$(database)/documents/householdInvites/$(incoming().inviteCode))
@@ -400,7 +485,7 @@ service cloud.firestore {
           && isValidId(householdId)
           && isValidId(memberUid)
           && existing().role == 'member'
-          && (request.auth.uid == memberUid || isHouseholdOwner(householdId));
+          && (request.auth.uid == memberUid || isHouseholdOwner(householdId) || isAdmin());
       }
 
       // 6b. Household Transactions Subcollection
@@ -408,7 +493,7 @@ service cloud.firestore {
         allow get: if isSignedIn()
           && isValidId(householdId)
           && isValidId(txId)
-          && isHouseholdMember(householdId);
+          && (isHouseholdMember(householdId) || isAdmin());
         allow list: if isSignedIn()
           && request.auth.uid in existing().memberIds;
         allow create: if isSignedIn()
@@ -430,7 +515,7 @@ service cloud.firestore {
           && incoming().authorId == existing().authorId
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && isHouseholdMember(householdId)
+          && (isHouseholdMember(householdId) || isAdmin())
           && (
             // Action 1: Edit transaction details
             (
@@ -450,7 +535,7 @@ service cloud.firestore {
               ])
             )
             ||
-            // Action 2: Sync memberIds after spouse joins household
+            // Action 2: Sync memberIds after spouse joins or leaves household
             (
               incoming().memberIds == get(/databases/$(database)/documents/households/$(householdId)).data.memberIds
               && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
@@ -459,7 +544,7 @@ service cloud.firestore {
         allow delete: if isSignedIn()
           && isValidId(householdId)
           && isValidId(txId)
-          && isHouseholdMember(householdId);
+          && (isHouseholdMember(householdId) || isAdmin());
       }
 
       // 6c. Household Recurring Bills Subcollection
@@ -467,7 +552,7 @@ service cloud.firestore {
         allow get: if isSignedIn()
           && isValidId(householdId)
           && isValidId(billId)
-          && isHouseholdMember(householdId);
+          && (isHouseholdMember(householdId) || isAdmin());
         allow list: if isSignedIn()
           && request.auth.uid in existing().memberIds;
         allow create: if isSignedIn()
@@ -489,7 +574,7 @@ service cloud.firestore {
           && incoming().authorId == existing().authorId
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && isHouseholdMember(householdId)
+          && (isHouseholdMember(householdId) || isAdmin())
           && (
             // Action 1: Edit bill or mark cycle paid
             (
@@ -506,7 +591,7 @@ service cloud.firestore {
               ])
             )
             ||
-            // Action 2: Sync memberIds after spouse joins household
+            // Action 2: Sync memberIds after spouse joins or leaves household
             (
               incoming().memberIds == get(/databases/$(database)/documents/households/$(householdId)).data.memberIds
               && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
@@ -515,7 +600,7 @@ service cloud.firestore {
         allow delete: if isSignedIn()
           && isValidId(householdId)
           && isValidId(billId)
-          && isHouseholdMember(householdId);
+          && (isHouseholdMember(householdId) || isAdmin());
       }
     }
   }
