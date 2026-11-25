@@ -42,6 +42,9 @@ interface BudgetsCycleViewProps {
   googleUser: User | null;
   hasDriveToken: boolean;
   driveFile: DriveFileMeta | null;
+  driveBusy: boolean;
+  driveError: string;
+  driveSuccess: string;
   onSignInGoogle: () => Promise<void>;
   onOpenDriveModal: () => void;
   reminderCount: number;
@@ -68,6 +71,9 @@ export function BudgetsCycleView({
   googleUser,
   hasDriveToken,
   driveFile,
+  driveBusy,
+  driveError,
+  driveSuccess,
   onSignInGoogle,
   onOpenDriveModal,
   reminderCount,
@@ -94,6 +100,7 @@ export function BudgetsCycleView({
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
+  const [statusIsError, setStatusIsError] = useState<boolean>(false);
   const [confirmClear, setConfirmClear] = useState(false);
 
   const previewCurrentCycle = getCycleRangeFromSettings(settings, 0);
@@ -148,10 +155,16 @@ export function BudgetsCycleView({
       const text = typeof reader.result === 'string' ? reader.result : '';
       const err = onImportBackup(text);
       if (err) {
+        setStatusIsError(true);
         setStatusMessage(err);
       } else {
+        setStatusIsError(false);
         setStatusMessage('បានផ្ទុកទិន្នន័យបម្រុងទុកឡើងវិញដោយជោគជ័យ។');
       }
+    };
+    reader.onerror = () => {
+      setStatusIsError(true);
+      setStatusMessage('មិនអាចអានឯកសារដែលបានជ្រើសរើសបានទេ។ សូមព្យាយាមម្តងទៀត។');
     };
     reader.readAsText(file);
     e.target.value = '';
@@ -255,15 +268,39 @@ export function BudgetsCycleView({
               <button
                 type="button"
                 onClick={onOpenDriveModal}
-                className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-sm font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-xl transition-colors whitespace-nowrap"
+                disabled={driveBusy}
+                className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-sm font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-xl transition-colors whitespace-nowrap disabled:opacity-50"
               >
                 គ្រប់គ្រង និងរក្សាទុកលើ Drive
               </button>
             ) : (
-              <GoogleSignInButton onClick={onSignInGoogle} fullWidth />
+              <GoogleSignInButton
+                onClick={onSignInGoogle}
+                disabled={driveBusy}
+                label={
+                  driveBusy
+                    ? 'កំពុងភ្ជាប់...'
+                    : googleUser
+                    ? 'ភ្ជាប់ Google Drive ឡើងវិញ'
+                    : 'ចូលគណនីជាមួយ Google'
+                }
+                fullWidth
+              />
             )}
           </div>
         </div>
+
+        {driveError && (
+          <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3.5 py-2.5 leading-relaxed">
+            {driveError}
+          </p>
+        )}
+
+        {driveSuccess && !driveError && (
+          <p className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded-xl px-3.5 py-2.5 leading-relaxed">
+            {driveSuccess}
+          </p>
+        )}
       </section>
 
       {/* 2. Custom 1-Month Period & Monthly Cutoff Selector */}
@@ -811,7 +848,7 @@ export function BudgetsCycleView({
           <input
             ref={fileInputRef}
             type="file"
-            accept="application/json"
+            accept=".json,application/json,text/plain"
             onChange={handleImportFile}
             className="hidden"
           />
@@ -820,6 +857,7 @@ export function BudgetsCycleView({
             type="button"
             onClick={() => {
               onResetSampleData();
+              setStatusIsError(false);
               setStatusMessage('បានផ្ទុកទិន្នន័យគំរូឡើងវិញ។');
             }}
             className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 transition-colors"
@@ -836,6 +874,7 @@ export function BudgetsCycleView({
                 onClick={() => {
                   onClearAllTransactions();
                   setConfirmClear(false);
+                  setStatusIsError(false);
                   setStatusMessage('បានសម្អាតកំណត់ត្រាទាំងអស់រួចរាល់។');
                 }}
                 className="min-h-[40px] px-3 py-1.5 font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg"
@@ -863,7 +902,13 @@ export function BudgetsCycleView({
         </div>
 
         {statusMessage && (
-          <p className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded-xl px-3.5 py-2.5">
+          <p
+            className={`text-xs rounded-xl px-3.5 py-2.5 border ${
+              statusIsError
+                ? 'text-red-700 bg-red-50 border-red-200'
+                : 'text-teal-800 bg-teal-50 border-teal-200'
+            }`}
+          >
             {statusMessage}
           </p>
         )}

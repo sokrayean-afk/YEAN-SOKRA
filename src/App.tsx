@@ -26,6 +26,7 @@ import {
   clearCachedAccessToken,
   getCachedAccessToken,
   initGoogleAuth,
+  markNeedsConsentPrompt,
   signInWithGoogleDrive,
   signOutGoogle,
 } from './services/googleAuth';
@@ -67,14 +68,139 @@ interface StoredState {
 }
 
 function normalizeSettings(partial?: Partial<HouseholdSettings>): HouseholdSettings {
+  const p = partial || {};
   return {
-    ...DEFAULT_SETTINGS,
-    ...(partial || {}),
+    householdName:
+      typeof p.householdName === 'string' ? p.householdName : DEFAULT_SETTINGS.householdName,
+    husbandName:
+      typeof p.husbandName === 'string' ? p.husbandName : DEFAULT_SETTINGS.husbandName,
+    wifeName:
+      typeof p.wifeName === 'string' ? p.wifeName : DEFAULT_SETTINGS.wifeName,
+    activeUser: p.activeUser === 'wife' ? 'wife' : 'husband',
+    cycleMode: p.cycleMode === 'custom_range' ? 'custom_range' : 'monthly_day',
+    cycleStartDay:
+      typeof p.cycleStartDay === 'number' && Number.isFinite(p.cycleStartDay)
+        ? Math.max(1, Math.min(28, Math.floor(p.cycleStartDay)))
+        : DEFAULT_SETTINGS.cycleStartDay,
+    customStartDate:
+      typeof p.customStartDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(p.customStartDate)
+        ? p.customStartDate
+        : DEFAULT_SETTINGS.customStartDate,
+    customEndDate:
+      typeof p.customEndDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(p.customEndDate)
+        ? p.customEndDate
+        : DEFAULT_SETTINGS.customEndDate,
+    displayCurrency: p.displayCurrency === 'KHR' ? 'KHR' : 'USD',
+    exchangeRate:
+      typeof p.exchangeRate === 'number' && Number.isFinite(p.exchangeRate) && p.exchangeRate >= 1000
+        ? p.exchangeRate
+        : DEFAULT_SETTINGS.exchangeRate,
+    monthlyBudgetTargetUsd:
+      typeof p.monthlyBudgetTargetUsd === 'number' &&
+      Number.isFinite(p.monthlyBudgetTargetUsd) &&
+      p.monthlyBudgetTargetUsd >= 0
+        ? p.monthlyBudgetTargetUsd
+        : DEFAULT_SETTINGS.monthlyBudgetTargetUsd,
+    notificationsEnabled:
+      typeof p.notificationsEnabled === 'boolean'
+        ? p.notificationsEnabled
+        : DEFAULT_SETTINGS.notificationsEnabled,
+    reminderDaysBefore:
+      typeof p.reminderDaysBefore === 'number' && Number.isFinite(p.reminderDaysBefore)
+        ? Math.max(1, Math.min(10, Math.floor(p.reminderDaysBefore)))
+        : DEFAULT_SETTINGS.reminderDaysBefore,
+    browserNotificationsEnabled:
+      typeof p.browserNotificationsEnabled === 'boolean'
+        ? p.browserNotificationsEnabled
+        : DEFAULT_SETTINGS.browserNotificationsEnabled,
     categoryBudgets: {
       ...DEFAULT_SETTINGS.categoryBudgets,
-      ...(partial?.categoryBudgets || {}),
+      ...(p.categoryBudgets && typeof p.categoryBudgets === 'object' ? p.categoryBudgets : {}),
     },
   };
+}
+
+function normalizeTransactions(rawList: unknown[]): Transaction[] {
+  const validPayment = new Set(['cash', 'aba', 'acleda', 'wing', 'other']);
+  const validMembers = new Set(['joint', 'husband', 'wife', 'family']);
+  const todayIso = getTodayIso();
+
+  return rawList
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item, idx) => {
+      const amountUsd =
+        typeof item.amountUsd === 'number' && Number.isFinite(item.amountUsd)
+          ? Math.max(0, item.amountUsd)
+          : 0;
+      const originalCurrency = item.originalCurrency === 'KHR' ? 'KHR' : 'USD';
+      const originalAmount =
+        typeof item.originalAmount === 'number' && Number.isFinite(item.originalAmount)
+          ? Math.max(0, item.originalAmount)
+          : amountUsd;
+      const dateStr =
+        typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date)
+          ? item.date
+          : todayIso;
+
+      return {
+        id: typeof item.id === 'string' && item.id ? item.id : `tx-restored-${Date.now()}-${idx}`,
+        type: item.type === 'income' ? 'income' : 'expense',
+        amountUsd,
+        originalAmount,
+        originalCurrency,
+        categoryId:
+          typeof item.categoryId === 'string' && item.categoryId
+            ? item.categoryId
+            : item.type === 'income'
+            ? 'other_inc'
+            : 'other_exp',
+        date: dateStr,
+        paymentMethod:
+          typeof item.paymentMethod === 'string' && validPayment.has(item.paymentMethod)
+            ? (item.paymentMethod as Transaction['paymentMethod'])
+            : 'cash',
+        member:
+          typeof item.member === 'string' && validMembers.has(item.member)
+            ? (item.member as Transaction['member'])
+            : 'joint',
+        note: typeof item.note === 'string' ? item.note : '',
+        billId: typeof item.billId === 'string' ? item.billId : undefined,
+        createdAt:
+          typeof item.createdAt === 'string' && item.createdAt
+            ? item.createdAt
+            : new Date().toISOString(),
+      };
+    });
+}
+
+function normalizeBills(rawList: unknown[]): RecurringBill[] {
+  const validPayment = new Set(['cash', 'aba', 'acleda', 'wing', 'other']);
+
+  return rawList
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item, idx) => ({
+      id: typeof item.id === 'string' && item.id ? item.id : `bill-restored-${Date.now()}-${idx}`,
+      title: typeof item.title === 'string' && item.title ? item.title : 'វិក្កយបត្រប្រចាំខែ',
+      categoryId:
+        typeof item.categoryId === 'string' && item.categoryId ? item.categoryId : 'utilities',
+      amountUsd:
+        typeof item.amountUsd === 'number' && Number.isFinite(item.amountUsd)
+          ? Math.max(0, item.amountUsd)
+          : 0,
+      dueDay:
+        typeof item.dueDay === 'number' && Number.isFinite(item.dueDay)
+          ? Math.max(1, Math.min(28, Math.floor(item.dueDay)))
+          : 1,
+      paymentMethod:
+        typeof item.paymentMethod === 'string' && validPayment.has(item.paymentMethod)
+          ? (item.paymentMethod as RecurringBill['paymentMethod'])
+          : 'aba',
+      note: typeof item.note === 'string' ? item.note : undefined,
+      paidCycles:
+        item.paidCycles && typeof item.paidCycles === 'object' && !Array.isArray(item.paidCycles)
+          ? (item.paidCycles as Record<string, string>)
+          : {},
+    }));
 }
 
 function loadInitialState(): StoredState {
@@ -88,8 +214,8 @@ function loadInitialState(): StoredState {
         parsed.settings
       ) {
         return {
-          transactions: parsed.transactions,
-          bills: parsed.bills,
+          transactions: normalizeTransactions(parsed.transactions),
+          bills: normalizeBills(parsed.bills),
           settings: normalizeSettings(parsed.settings),
         };
       }
@@ -157,27 +283,39 @@ export default function App() {
     }
   }, [transactions, bills, settings]);
 
-  const refreshDriveFileMeta = useCallback(async (tokenOverride?: string) => {
-    const token = tokenOverride || getCachedAccessToken();
-    if (!token) {
+  const handleDriveError = useCallback((err: unknown, fallbackMsg: string) => {
+    if (err instanceof DriveAuthError) {
+      clearCachedAccessToken();
       setHasDriveToken(false);
-      return;
-    }
-    setDriveBusy(true);
-    setDriveError('');
-    try {
-      const found = await findDriveDataFile(token);
-      setDriveFile(found);
-    } catch (err: unknown) {
-      if (err instanceof DriveAuthError) {
-        clearCachedAccessToken();
-        setHasDriveToken(false);
+      if (err.requiresConsent) {
+        markNeedsConsentPrompt();
       }
-      setDriveError(err instanceof Error ? err.message : 'មិនអាចពិនិត្យ Google Drive បានទេ។');
-    } finally {
-      setDriveBusy(false);
     }
+    setDriveError(err instanceof Error ? err.message : fallbackMsg);
   }, []);
+
+  const refreshDriveFileMeta = useCallback(
+    async (tokenOverride?: string): Promise<boolean> => {
+      const token = tokenOverride || getCachedAccessToken();
+      if (!token) {
+        setHasDriveToken(false);
+        return false;
+      }
+      setDriveBusy(true);
+      setDriveError('');
+      try {
+        const found = await findDriveDataFile(token);
+        setDriveFile(found);
+        return true;
+      } catch (err: unknown) {
+        handleDriveError(err, 'មិនអាចពិនិត្យ Google Drive បានទេ។');
+        return false;
+      } finally {
+        setDriveBusy(false);
+      }
+    },
+    [handleDriveError]
+  );
 
   // Initialize Firebase Auth listener for Google Drive
   useEffect(() => {
@@ -203,14 +341,12 @@ export default function App() {
       const result = await signInWithGoogleDrive();
       setGoogleUser(result.user);
       setHasDriveToken(true);
-      await refreshDriveFileMeta(result.accessToken);
-      setDriveSuccess('បានភ្ជាប់ Google Drive ដោយជោគជ័យ។');
+      const ok = await refreshDriveFileMeta(result.accessToken);
+      if (ok) {
+        setDriveSuccess('បានភ្ជាប់ Google Drive ដោយជោគជ័យ។');
+      }
     } catch (err: unknown) {
-      setDriveError(
-        err instanceof Error
-          ? err.message
-          : 'ការចូលគណនី Google មិនបានជោគជ័យទេ។'
-      );
+      handleDriveError(err, 'ការចូលគណនី Google មិនបានជោគជ័យទេ។');
     } finally {
       setDriveBusy(false);
     }
@@ -246,11 +382,7 @@ export default function App() {
       setDriveFile(saved);
       setDriveSuccess('បានរក្សាទុកទិន្នន័យទៅក្នុង Google Drive ដោយជោគជ័យ។');
     } catch (err: unknown) {
-      if (err instanceof DriveAuthError) {
-        clearCachedAccessToken();
-        setHasDriveToken(false);
-      }
-      setDriveError(err instanceof Error ? err.message : 'មិនអាចរក្សាទុកទៅ Google Drive បានទេ។');
+      handleDriveError(err, 'មិនអាចរក្សាទុកទៅ Google Drive បានទេ។');
     } finally {
       setDriveBusy(false);
     }
@@ -270,19 +402,15 @@ export default function App() {
       if (!Array.isArray(loaded.transactions) || !Array.isArray(loaded.bills)) {
         throw new Error('ទម្រង់ឯកសារនៅលើ Google Drive មិនត្រឹមត្រូវទេ។');
       }
-      setTransactions(loaded.transactions);
-      setBills(loaded.bills);
+      setTransactions(normalizeTransactions(loaded.transactions));
+      setBills(normalizeBills(loaded.bills));
       if (loaded.settings) {
         setSettings(normalizeSettings(loaded.settings));
       }
       setCycleOffset(0);
       setDriveSuccess('បានទាញយកទិន្នន័យពី Google Drive មកប្រើដោយជោគជ័យ។');
     } catch (err: unknown) {
-      if (err instanceof DriveAuthError) {
-        clearCachedAccessToken();
-        setHasDriveToken(false);
-      }
-      setDriveError(err instanceof Error ? err.message : 'មិនអាចទាញយកទិន្នន័យពី Google Drive បានទេ។');
+      handleDriveError(err, 'មិនអាចទាញយកទិន្នន័យពី Google Drive បានទេ។');
     } finally {
       setDriveBusy(false);
     }
@@ -299,11 +427,7 @@ export default function App() {
       setDriveFile(null);
       setDriveSuccess('បានលុបឯកសារបម្រុងទុកចេញពី Google Drive រួចរាល់។');
     } catch (err: unknown) {
-      if (err instanceof DriveAuthError) {
-        clearCachedAccessToken();
-        setHasDriveToken(false);
-      }
-      setDriveError(err instanceof Error ? err.message : 'មិនអាចលុបឯកសារពី Google Drive បានទេ។');
+      handleDriveError(err, 'មិនអាចលុបឯកសារពី Google Drive បានទេ។');
     } finally {
       setDriveBusy(false);
     }
@@ -499,7 +623,7 @@ export default function App() {
   const handleExportBackup = () => {
     const payload: StoredState = { transactions, bills, settings };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: 'application/json',
+      type: 'application/json;charset=utf-8',
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -508,7 +632,7 @@ export default function App() {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleImportBackup = (jsonText: string): string | null => {
@@ -517,8 +641,8 @@ export default function App() {
       if (!Array.isArray(parsed.transactions) || !Array.isArray(parsed.bills)) {
         return 'ឯកសារ JSON មិនត្រឹមត្រូវតាមទម្រង់ប្រព័ន្ធទេ។';
       }
-      setTransactions(parsed.transactions);
-      setBills(parsed.bills);
+      setTransactions(normalizeTransactions(parsed.transactions));
+      setBills(normalizeBills(parsed.bills));
       if (parsed.settings) {
         setSettings(normalizeSettings(parsed.settings));
       }
@@ -719,9 +843,11 @@ export default function App() {
               googleUser={googleUser}
               hasDriveToken={hasDriveToken}
               driveFile={driveFile}
+              driveBusy={driveBusy}
+              driveError={driveError}
+              driveSuccess={driveSuccess}
               onSignInGoogle={handleGoogleSignIn}
               onOpenDriveModal={() => {
-                setDriveError('');
                 setDriveSuccess('');
                 setDriveModalOpen(true);
               }}
@@ -804,7 +930,9 @@ export default function App() {
         localBillCount={bills.length}
         onSignIn={handleGoogleSignIn}
         onSignOut={handleGoogleSignOut}
-        onRefreshFile={() => refreshDriveFileMeta()}
+        onRefreshFile={async () => {
+          await refreshDriveFileMeta();
+        }}
         onConfirmSaveToDrive={handleConfirmSaveToDrive}
         onConfirmLoadFromDrive={handleConfirmLoadFromDrive}
         onConfirmDeleteDriveFile={handleConfirmDeleteDriveFile}

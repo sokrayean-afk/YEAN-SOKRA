@@ -130,7 +130,9 @@ export function DriveModal({
                 disabled={isBusy}
                 fullWidth
                 label={
-                  googleUser
+                  isBusy
+                    ? 'កំពុងភ្ជាប់...'
+                    : googleUser
                     ? 'ភ្ជាប់ Google Drive ឡើងវិញ'
                     : 'ចូលគណនីជាមួយ Google'
                 }
