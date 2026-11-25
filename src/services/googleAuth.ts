@@ -1,35 +1,18 @@
-import { getApp, getApps, initializeApp, type FirebaseApp } from 'firebase/app';
 import {
-  getAuth,
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithPopup,
-  type Auth,
   type User,
 } from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
+import {
+  getFirebaseAuthSafe,
+  getFirebaseInitError,
+  getFirebaseProjectId,
+} from './firebase';
+
+export { getFirebaseProjectId };
 
 export const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
-
-let cachedAuth: Auth | null = null;
-let authInitError: Error | null = null;
-
-function getFirebaseAuthSafe(): Auth | null {
-  if (cachedAuth) return cachedAuth;
-  if (authInitError) return null;
-  try {
-    const app: FirebaseApp =
-      getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-    cachedAuth = getAuth(app);
-    return cachedAuth;
-  } catch (err: unknown) {
-    authInitError =
-      err instanceof Error
-        ? err
-        : new Error('មិនអាចចាប់ផ្តើមសេវាកម្មចូលគណនី Google បានទេ។');
-    return null;
-  }
-}
 
 let isSigningIn = false;
 // In-memory only access token cache (never stored in localStorage/sessionStorage)
@@ -50,6 +33,16 @@ function buildGoogleProvider(forceConsent: boolean): GoogleAuthProvider {
   return provider;
 }
 
+export class GoogleAuthError extends Error {
+  code: string;
+
+  constructor(message: string, code = '') {
+    super(message);
+    this.name = 'GoogleAuthError';
+    this.code = code;
+  }
+}
+
 function mapFirebaseAuthError(error: unknown): Error {
   const code =
     typeof error === 'object' && error !== null && 'code' in error
@@ -58,50 +51,62 @@ function mapFirebaseAuthError(error: unknown): Error {
 
   switch (code) {
     case 'auth/popup-blocked':
-      return new Error(
-        'កម្មវិធីរុករកបានបិទផ្ទាំងចូលគណនី Google (Popup blocked)។ សូមអនុញ្ញាតផ្ទាំង Popup រួចព្យាយាមម្តងទៀត។'
+      return new GoogleAuthError(
+        'កម្មវិធីរុករកបានបិទផ្ទាំងចូលគណនី Google (Popup blocked)។ សូមអនុញ្ញាតផ្ទាំង Popup រួចព្យាយាមម្តងទៀត។',
+        code
       );
     case 'auth/popup-closed-by-user':
-      return new Error(
-        'ផ្ទាំងចូលគណនី Google ត្រូវបានបិទមុនពេលបញ្ចប់។ សូមចុចចូលគណនីម្តងទៀត។'
+      return new GoogleAuthError(
+        'ផ្ទាំងចូលគណនី Google ត្រូវបានបិទមុនពេលបញ្ចប់។ សូមចុចចូលគណនីម្តងទៀត។',
+        code
       );
     case 'auth/cancelled-popup-request':
-      return new Error('សំណើចូលគណនីត្រូវបានផ្អាក ដោយសារមានការចុចច្រើនដង។ សូមព្យាយាមម្តងទៀត។');
+      return new GoogleAuthError(
+        'សំណើចូលគណនីត្រូវបានផ្អាក ដោយសារមានការចុចច្រើនដង។ សូមព្យាយាមម្តងទៀត។',
+        code
+      );
     case 'auth/unauthorized-domain':
-      return new Error(
-        'ដែនវេបសាយនេះមិនទាន់ត្រូវបានអនុញ្ញាតសម្រាប់ការចូលគណនី Google ទេ។ សូមបន្ថែមដែននេះក្នុង Firebase Authorized Domains ឬប្រើការរក្សាទុក JSON។'
+      return new GoogleAuthError(
+        'ដែនវេបសាយនេះមិនទាន់ត្រូវបានអនុញ្ញាតក្នុង Firebase Authentication ទេ។ សូមបន្ថែមដែននេះក្នុង Firebase Authorized Domains ដើម្បីចូលគណនី។',
+        code
       );
     case 'auth/network-request-failed':
-      return new Error('មិនអាចភ្ជាប់អ៊ីនធឺណិតបានទេ។ សូមពិនិត្យការភ្ជាប់បណ្តាញរបស់អ្នក។');
+      return new GoogleAuthError(
+        'មិនអាចភ្ជាប់អ៊ីនធឺណិតបានទេ។ សូមពិនិត្យការភ្ជាប់បណ្តាញរបស់អ្នក។',
+        code
+      );
     case 'auth/operation-not-allowed':
-      return new Error('មុខងារចូលគណនី Google មិនទាន់ត្រូវបានបើកនៅលើប្រព័ន្ធទេ។');
+      return new GoogleAuthError(
+        'មុខងារចូលគណនី Google មិនទាន់ត្រូវបានបើកនៅលើប្រព័ន្ធទេ។',
+        code
+      );
     case 'auth/internal-error':
-      return new Error(
-        'មានបញ្ហាបច្ចេកទេសពេលបើកផ្ទាំងចូលគណនី Google។ សូមសាកល្បងបើកក្នុងផ្ទាំង Browser ពេញ ឬព្យាយាមម្តងទៀត។'
+      return new GoogleAuthError(
+        'មានបញ្ហាបច្ចេកទេសពេលបើកផ្ទាំងចូលគណនី Google។ សូមសាកល្បងបើកក្នុងផ្ទាំង Browser ពេញ ឬព្យាយាមម្តងទៀត។',
+        code
       );
     default:
       if (error instanceof Error && error.message) {
-        return error;
+        return new GoogleAuthError(error.message, code);
       }
-      return new Error('ការចូលគណនី Google មិនបានជោគជ័យទេ។ សូមព្យាយាមម្តងទៀត។');
+      return new GoogleAuthError('ការចូលគណនី Google មិនបានជោគជ័យទេ។ សូមព្យាយាមម្តងទៀត។', code);
   }
 }
 
 export function initGoogleAuth(
-  onAuthReady: (user: User, token: string) => void,
-  onNeedsAuth: (user: User | null) => void
+  onAuthState: (user: User | null, driveToken: string | null) => void
 ): () => void {
   const auth = getFirebaseAuthSafe();
   if (!auth) {
-    onNeedsAuth(null);
+    onAuthState(null, null);
     return () => {};
   }
   return onAuthStateChanged(auth, (user) => {
-    if (user && cachedAccessToken) {
-      onAuthReady(user, cachedAccessToken);
+    if (user) {
+      onAuthState(user, cachedAccessToken);
     } else if (!isSigningIn) {
       cachedAccessToken = null;
-      onNeedsAuth(user);
+      onAuthState(null, null);
     }
   });
 }
@@ -110,13 +115,13 @@ export async function signInWithGoogleDrive(
   forceConsent = false
 ): Promise<{
   user: User;
-  accessToken: string;
+  accessToken: string | null;
 }> {
   const auth = getFirebaseAuthSafe();
   if (!auth) {
     throw (
-      authInitError ||
-      new Error('មិនអាចចាប់ផ្តើមសេវាកម្ម Google Drive បានទេ។ សូមប្រើការទាញយក JSON ជាបណ្តោះអាសន្ន។')
+      getFirebaseInitError() ||
+      new Error('មិនអាចចាប់ផ្តើមសេវាកម្មចូលគណនី Google បានទេ។')
     );
   }
   try {
@@ -124,13 +129,10 @@ export async function signInWithGoogleDrive(
     const provider = buildGoogleProvider(forceConsent || needsConsentPrompt);
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error(
-        'មិនអាចទទួលបានសិទ្ធិចូលប្រើ Google Drive បានទេ។ សូមធីកយល់ព្រមសិទ្ធិ Google Drive រួចព្យាយាមម្តងទៀត។'
-      );
+    cachedAccessToken = credential?.accessToken || null;
+    if (cachedAccessToken) {
+      needsConsentPrompt = false;
     }
-    cachedAccessToken = credential.accessToken;
-    needsConsentPrompt = false;
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: unknown) {
     throw mapFirebaseAuthError(error);

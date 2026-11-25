@@ -142,7 +142,7 @@ export function Sidebar({
             )}
           </button>
 
-          {/* Google Drive shortcut */}
+          {/* Online Cloud Sync & Drive shortcut */}
           <button
             type="button"
             onClick={onOpenDriveModal}
@@ -150,17 +150,17 @@ export function Sidebar({
           >
             <Cloud
               className={`w-4 h-4 shrink-0 ${
-                hasDriveToken ? 'text-teal-700' : 'text-slate-400'
+                googleUser || hasDriveToken ? 'text-teal-700' : 'text-slate-400'
               }`}
             />
             <div className="min-w-0 flex-1">
               <div className="text-xs font-semibold text-slate-800 truncate">
-                Google Drive
+                {googleUser ? 'អនឡាញ · គ្រប់ឧបករណ៍' : 'ភ្ជាប់អនឡាញ (Cloud)'}
               </div>
               <div className="text-[11px] text-slate-500 truncate">
-                {hasDriveToken
-                  ? googleUser?.email || 'បានភ្ជាប់រួច'
-                  : 'ចុចដើម្បីរក្សាទុកទិន្នន័យ'}
+                {googleUser
+                  ? googleUser.email || 'កំពុងធ្វើសមកាលកម្ម'
+                  : 'ចុចដើម្បីប្រើលើគ្រប់ឧបករណ៍'}
               </div>
             </div>
           </button>

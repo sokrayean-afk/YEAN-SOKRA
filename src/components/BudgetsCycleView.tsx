@@ -40,6 +40,8 @@ interface BudgetsCycleViewProps {
   categories: Category[];
   bills: RecurringBill[];
   googleUser: User | null;
+  cloudInviteCode?: string;
+  cloudMemberCount?: number;
   hasDriveToken: boolean;
   driveFile: DriveFileMeta | null;
   driveBusy: boolean;
@@ -69,6 +71,8 @@ export function BudgetsCycleView({
   categories,
   bills,
   googleUser,
+  cloudInviteCode,
+  cloudMemberCount,
   hasDriveToken,
   driveFile,
   driveBusy,
@@ -244,46 +248,44 @@ export function BudgetsCycleView({
         </div>
       </section>
 
-      {/* 1. Google Drive Cloud Backup & Sync Card */}
+      {/* 1. Online Multi-Device Cloud Sync & Google Drive Card */}
       <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <Cloud className="w-5 h-5 text-teal-700 shrink-0" />
               <h2 className="text-base font-semibold text-slate-900">
-                រក្សាទុកទិន្នន័យក្នុង Google Drive
+                សមកាលកម្មអនឡាញគ្រប់ឧបករណ៍ និង Google Drive
               </h2>
             </div>
             <p className="text-xs sm:text-sm text-slate-500">
-              {hasDriveToken
-                ? `បានភ្ជាប់ជាមួយ ${googleUser?.email || 'គណនី Google'}${
-                    driveFile ? ' · មានឯកសារបម្រុងទុកលើ Drive' : ''
-                  }`
-                : 'ភ្ជាប់គណនី Google ដើម្បីរក្សាទុក និងទាញយកទិន្នន័យគ្រួសាររបស់អ្នកលើទូរស័ព្ទ និងកុំព្យូទ័រ។'}
+              {googleUser
+                ? `បានភ្ជាប់អនឡាញជាមួយ ${googleUser.email || 'គណនី Google'}${
+                    cloudInviteCode ? ` · កូដគ្រួសារ៖ ${cloudInviteCode}` : ''
+                  }${
+                    cloudMemberCount && cloudMemberCount > 1
+                      ? ` (${cloudMemberCount} គណនី)`
+                      : ''
+                  }${driveFile ? ' · មានឯកសារលើ Drive' : ''}`
+                : 'ចូលគណនី Google ដើម្បីរក្សាទុកអនឡាញ និងប្រើទិន្នន័យគ្រួសារតែមួយលើគ្រប់ទូរស័ព្ទ និងកុំព្យូទ័រ។'}
             </p>
           </div>
 
           <div className="shrink-0">
-            {hasDriveToken ? (
+            {googleUser ? (
               <button
                 type="button"
                 onClick={onOpenDriveModal}
                 disabled={driveBusy}
                 className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-sm font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-xl transition-colors whitespace-nowrap disabled:opacity-50"
               >
-                គ្រប់គ្រង និងរក្សាទុកលើ Drive
+                គ្រប់គ្រងអនឡាញ និង Google Drive
               </button>
             ) : (
               <GoogleSignInButton
                 onClick={onSignInGoogle}
                 disabled={driveBusy}
-                label={
-                  driveBusy
-                    ? 'កំពុងភ្ជាប់...'
-                    : googleUser
-                    ? 'ភ្ជាប់ Google Drive ឡើងវិញ'
-                    : 'ចូលគណនីជាមួយ Google'
-                }
+                label={driveBusy ? 'កំពុងភ្ជាប់...' : 'ចូលគណនីជាមួយ Google'}
                 fullWidth
               />
             )}

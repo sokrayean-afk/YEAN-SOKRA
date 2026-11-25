@@ -1,0 +1,522 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidInviteCode(code) {
+      return code is string && code.size() >= 6 && code.size() <= 12 && code.matches('^[A-Z0-9]+$');
+    }
+
+    function isValidDateStr(d) {
+      return d is string && d.size() == 10 && d.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidMemberIds(listVal) {
+      return listVal is list
+        && listVal.size() >= 1
+        && listVal.size() <= 5
+        && listVal[0] is string
+        && isValidId(listVal[0]);
+    }
+
+    function isValidPaymentMethod(val) {
+      return val is string && (val == 'cash' || val == 'aba' || val == 'acleda' || val == 'wing' || val == 'other');
+    }
+
+    function isValidCurrency(val) {
+      return val is string && (val == 'USD' || val == 'KHR');
+    }
+
+    function isHouseholdMember(householdId) {
+      return exists(/databases/$(database)/documents/households/$(householdId)/members/$(request.auth.uid));
+    }
+
+    function isHouseholdOwner(householdId) {
+      return get(/databases/$(database)/documents/households/$(householdId)).data.ownerId == request.auth.uid;
+    }
+
+    // 3. Entity Validation Blueprints (Anti-Update-Gap)
+    function isValidUserWorkspace(data, userId) {
+      return data.keys().hasAll(['uid', 'activeHouseholdId', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'activeHouseholdId', 'createdAt', 'updatedAt'])
+        && data.uid == request.auth.uid
+        && data.uid == userId
+        && isValidId(data.uid)
+        && isValidId(data.activeHouseholdId)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidHouseholdInvite(data, inviteCode) {
+      return data.keys().hasAll(['inviteCode', 'householdId', 'ownerId', 'createdAt'])
+        && data.keys().hasOnly(['inviteCode', 'householdId', 'ownerId', 'createdAt'])
+        && data.inviteCode == inviteCode
+        && isValidInviteCode(data.inviteCode)
+        && isValidId(data.householdId)
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.createdAt is timestamp;
+    }
+
+    function isValidHousehold(data) {
+      return data.keys().hasAll([
+          'ownerId',
+          'memberIds',
+          'inviteCode',
+          'householdName',
+          'husbandName',
+          'wifeName',
+          'activeUser',
+          'cycleMode',
+          'cycleStartDay',
+          'customStartDate',
+          'customEndDate',
+          'displayCurrency',
+          'exchangeRate',
+          'monthlyBudgetTargetUsd',
+          'notificationsEnabled',
+          'reminderDaysBefore',
+          'browserNotificationsEnabled',
+          'categoryBudgets',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'memberIds',
+          'inviteCode',
+          'householdName',
+          'husbandName',
+          'wifeName',
+          'activeUser',
+          'cycleMode',
+          'cycleStartDay',
+          'customStartDate',
+          'customEndDate',
+          'displayCurrency',
+          'exchangeRate',
+          'monthlyBudgetTargetUsd',
+          'notificationsEnabled',
+          'reminderDaysBefore',
+          'browserNotificationsEnabled',
+          'categoryBudgets',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && isValidMemberIds(data.memberIds)
+        && data.ownerId in data.memberIds
+        && isValidInviteCode(data.inviteCode)
+        && data.householdName is string && data.householdName.size() >= 1 && data.householdName.size() <= 100
+        && data.husbandName is string && data.husbandName.size() >= 1 && data.husbandName.size() <= 60
+        && data.wifeName is string && data.wifeName.size() >= 1 && data.wifeName.size() <= 60
+        && data.activeUser is string && (data.activeUser == 'husband' || data.activeUser == 'wife')
+        && data.cycleMode is string && (data.cycleMode == 'monthly_day' || data.cycleMode == 'custom_range')
+        && data.cycleStartDay is int && data.cycleStartDay >= 1 && data.cycleStartDay <= 28
+        && isValidDateStr(data.customStartDate)
+        && isValidDateStr(data.customEndDate)
+        && isValidCurrency(data.displayCurrency)
+        && data.exchangeRate is number && data.exchangeRate >= 1000 && data.exchangeRate <= 100000
+        && data.monthlyBudgetTargetUsd is number && data.monthlyBudgetTargetUsd >= 0 && data.monthlyBudgetTargetUsd <= 10000000
+        && data.notificationsEnabled is bool
+        && data.reminderDaysBefore is int && data.reminderDaysBefore >= 1 && data.reminderDaysBefore <= 10
+        && data.browserNotificationsEnabled is bool
+        && data.categoryBudgets is map && data.categoryBudgets.size() <= 50
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidHouseholdMember(data, householdId, memberUid) {
+      return data.keys().hasAll(['uid', 'householdId', 'role', 'inviteCode', 'joinedAt'])
+        && data.keys().hasOnly(['uid', 'householdId', 'role', 'inviteCode', 'joinedAt'])
+        && data.uid == memberUid
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.householdId == householdId
+        && isValidId(data.householdId)
+        && data.role is string && (data.role == 'owner' || data.role == 'member')
+        && isValidInviteCode(data.inviteCode)
+        && data.joinedAt is timestamp;
+    }
+
+    function isValidTransaction(data, householdId, txId) {
+      return data.keys().hasAll([
+          'id',
+          'householdId',
+          'authorId',
+          'memberIds',
+          'type',
+          'amountUsd',
+          'originalAmount',
+          'originalCurrency',
+          'categoryId',
+          'date',
+          'paymentMethod',
+          'member',
+          'note',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'householdId',
+          'authorId',
+          'memberIds',
+          'type',
+          'amountUsd',
+          'originalAmount',
+          'originalCurrency',
+          'categoryId',
+          'date',
+          'paymentMethod',
+          'member',
+          'note',
+          'billId',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id == txId
+        && isValidId(data.id)
+        && data.householdId == householdId
+        && isValidId(data.householdId)
+        && isValidId(data.authorId)
+        && isValidMemberIds(data.memberIds)
+        && data.type is string && (data.type == 'income' || data.type == 'expense')
+        && data.amountUsd is number && data.amountUsd >= 0 && data.amountUsd <= 100000000
+        && data.originalAmount is number && data.originalAmount >= 0 && data.originalAmount <= 1000000000000
+        && isValidCurrency(data.originalCurrency)
+        && data.categoryId is string && data.categoryId.size() >= 1 && data.categoryId.size() <= 50 && data.categoryId.matches('^[a-zA-Z0-9_\\-]+$')
+        && isValidDateStr(data.date)
+        && isValidPaymentMethod(data.paymentMethod)
+        && data.member is string && (data.member == 'joint' || data.member == 'husband' || data.member == 'wife' || data.member == 'family')
+        && data.note is string && data.note.size() <= 300
+        && (!('billId' in data) || (data.billId is string && data.billId.size() <= 128 && data.billId.matches('^[a-zA-Z0-9_\\-]*$')))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBill(data, householdId, billId) {
+      return data.keys().hasAll([
+          'id',
+          'householdId',
+          'authorId',
+          'memberIds',
+          'title',
+          'categoryId',
+          'amountUsd',
+          'dueDay',
+          'paymentMethod',
+          'note',
+          'paidCycles',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'householdId',
+          'authorId',
+          'memberIds',
+          'title',
+          'categoryId',
+          'amountUsd',
+          'dueDay',
+          'paymentMethod',
+          'note',
+          'paidCycles',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id == billId
+        && isValidId(data.id)
+        && data.householdId == householdId
+        && isValidId(data.householdId)
+        && isValidId(data.authorId)
+        && isValidMemberIds(data.memberIds)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.categoryId is string && data.categoryId.size() >= 1 && data.categoryId.size() <= 50 && data.categoryId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.amountUsd is number && data.amountUsd >= 0 && data.amountUsd <= 100000000
+        && data.dueDay is int && data.dueDay >= 1 && data.dueDay <= 28
+        && isValidPaymentMethod(data.paymentMethod)
+        && data.note is string && data.note.size() <= 300
+        && data.paidCycles is map && data.paidCycles.size() <= 240
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 4. User Workspace Pointer (strictly self-owned, zero PII)
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserWorkspace(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/households/$(incoming().activeHouseholdId)/members/$(request.auth.uid));
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserWorkspace(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['activeHouseholdId', 'updatedAt'])
+        && existsAfter(/databases/$(database)/documents/households/$(incoming().activeHouseholdId)/members/$(request.auth.uid));
+      allow delete: if false;
+    }
+
+    // 5. Household Invite Code Lookup (get-only by exact code, never listable, owner-verified)
+    match /householdInvites/{inviteCode} {
+      allow get: if isSignedIn() && isValidInviteCode(inviteCode);
+      allow list: if false;
+      allow create: if isSignedIn()
+        && isValidInviteCode(inviteCode)
+        && isValidHouseholdInvite(incoming(), inviteCode)
+        && incoming().createdAt == request.time
+        && getAfter(/databases/$(database)/documents/households/$(incoming().householdId)).data.ownerId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/households/$(incoming().householdId)).data.inviteCode == inviteCode;
+      allow update: if false;
+      allow delete: if isSignedIn()
+        && isValidInviteCode(inviteCode)
+        && existing().ownerId == request.auth.uid;
+    }
+
+    // 6. Households Master Document
+    match /households/{householdId} {
+      allow get: if isSignedIn()
+        && isValidId(householdId)
+        && (request.auth.uid in existing().memberIds || isHouseholdMember(householdId));
+      allow list: if isSignedIn()
+        && request.auth.uid in existing().memberIds;
+      allow create: if isSignedIn()
+        && isValidId(householdId)
+        && isValidHousehold(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().memberIds.size() == 1
+        && incoming().memberIds[0] == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/households/$(householdId)/members/$(request.auth.uid))
+        && existsAfter(/databases/$(database)/documents/householdInvites/$(incoming().inviteCode));
+      allow update: if isSignedIn()
+        && isValidId(householdId)
+        && isValidHousehold(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Member updates household settings
+          (
+            isHouseholdMember(householdId)
+            && incoming().memberIds == existing().memberIds
+            && incoming().inviteCode == existing().inviteCode
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'householdName',
+              'husbandName',
+              'wifeName',
+              'activeUser',
+              'cycleMode',
+              'cycleStartDay',
+              'customStartDate',
+              'customEndDate',
+              'displayCurrency',
+              'exchangeRate',
+              'monthlyBudgetTargetUsd',
+              'notificationsEnabled',
+              'reminderDaysBefore',
+              'browserNotificationsEnabled',
+              'categoryBudgets',
+              'updatedAt'
+            ])
+          )
+          ||
+          // Action 2: Verified invite join adds joining user's UID to bounded memberIds
+          (
+            !(request.auth.uid in existing().memberIds)
+            && request.auth.uid in incoming().memberIds
+            && incoming().memberIds.size() == existing().memberIds.size() + 1
+            && incoming().memberIds.hasAll(existing().memberIds)
+            && incoming().inviteCode == existing().inviteCode
+            && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
+            && getAfter(/databases/$(database)/documents/households/$(householdId)/members/$(request.auth.uid)).data.role == 'member'
+          )
+        );
+      allow delete: if false;
+
+      // 6a. Authoritative Membership Subcollection
+      match /members/{memberUid} {
+        allow get: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(memberUid)
+          && (request.auth.uid == memberUid || isHouseholdMember(householdId));
+        allow list: if isSignedIn()
+          && existing().uid == request.auth.uid;
+        allow create: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(memberUid)
+          && isValidHouseholdMember(incoming(), householdId, memberUid)
+          && incoming().joinedAt == request.time
+          && (
+            // Owner creating own membership atomically with household
+            (
+              incoming().role == 'owner'
+              && getAfter(/databases/$(database)/documents/households/$(householdId)).data.ownerId == request.auth.uid
+              && getAfter(/databases/$(database)/documents/households/$(householdId)).data.inviteCode == incoming().inviteCode
+            )
+            ||
+            // Spouse joining as member with valid invite code
+            (
+              incoming().role == 'member'
+              && exists(/databases/$(database)/documents/householdInvites/$(incoming().inviteCode))
+              && get(/databases/$(database)/documents/householdInvites/$(incoming().inviteCode)).data.householdId == householdId
+              && getAfter(/databases/$(database)/documents/households/$(householdId)).data.memberIds.hasAll([request.auth.uid])
+            )
+          );
+        allow update: if false;
+        allow delete: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(memberUid)
+          && existing().role == 'member'
+          && (request.auth.uid == memberUid || isHouseholdOwner(householdId));
+      }
+
+      // 6b. Household Transactions Subcollection
+      match /transactions/{txId} {
+        allow get: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(txId)
+          && isHouseholdMember(householdId);
+        allow list: if isSignedIn()
+          && request.auth.uid in existing().memberIds;
+        allow create: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(txId)
+          && isValidTransaction(incoming(), householdId, txId)
+          && incoming().authorId == request.auth.uid
+          && request.auth.uid in incoming().memberIds
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isHouseholdMember(householdId)
+          && incoming().memberIds == get(/databases/$(database)/documents/households/$(householdId)).data.memberIds;
+        allow update: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(txId)
+          && isValidTransaction(incoming(), householdId, txId)
+          && incoming().id == existing().id
+          && incoming().householdId == existing().householdId
+          && incoming().authorId == existing().authorId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && isHouseholdMember(householdId)
+          && (
+            // Action 1: Edit transaction details
+            (
+              incoming().memberIds == existing().memberIds
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'type',
+                'amountUsd',
+                'originalAmount',
+                'originalCurrency',
+                'categoryId',
+                'date',
+                'paymentMethod',
+                'member',
+                'note',
+                'billId',
+                'updatedAt'
+              ])
+            )
+            ||
+            // Action 2: Sync memberIds after spouse joins household
+            (
+              incoming().memberIds == get(/databases/$(database)/documents/households/$(householdId)).data.memberIds
+              && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
+            )
+          );
+        allow delete: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(txId)
+          && isHouseholdMember(householdId);
+      }
+
+      // 6c. Household Recurring Bills Subcollection
+      match /bills/{billId} {
+        allow get: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(billId)
+          && isHouseholdMember(householdId);
+        allow list: if isSignedIn()
+          && request.auth.uid in existing().memberIds;
+        allow create: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(billId)
+          && isValidBill(incoming(), householdId, billId)
+          && incoming().authorId == request.auth.uid
+          && request.auth.uid in incoming().memberIds
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isHouseholdMember(householdId)
+          && incoming().memberIds == get(/databases/$(database)/documents/households/$(householdId)).data.memberIds;
+        allow update: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(billId)
+          && isValidBill(incoming(), householdId, billId)
+          && incoming().id == existing().id
+          && incoming().householdId == existing().householdId
+          && incoming().authorId == existing().authorId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && isHouseholdMember(householdId)
+          && (
+            // Action 1: Edit bill or mark cycle paid
+            (
+              incoming().memberIds == existing().memberIds
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'title',
+                'categoryId',
+                'amountUsd',
+                'dueDay',
+                'paymentMethod',
+                'note',
+                'paidCycles',
+                'updatedAt'
+              ])
+            )
+            ||
+            // Action 2: Sync memberIds after spouse joins household
+            (
+              incoming().memberIds == get(/databases/$(database)/documents/households/$(householdId)).data.memberIds
+              && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt'])
+            )
+          );
+        allow delete: if isSignedIn()
+          && isValidId(householdId)
+          && isValidId(billId)
+          && isHouseholdMember(householdId);
+      }
+    }
+  }
+}

@@ -5,7 +5,7 @@
 
 import type { User } from 'firebase/auth';
 import { Bell, Cloud, Plus } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnalyticsView } from './components/AnalyticsView';
 import { BillModal } from './components/BillModal';
 import { BudgetsCycleView } from './components/BudgetsCycleView';
@@ -25,6 +25,7 @@ import {
 import {
   clearCachedAccessToken,
   getCachedAccessToken,
+  GoogleAuthError,
   initGoogleAuth,
   markNeedsConsentPrompt,
   signInWithGoogleDrive,
@@ -38,6 +39,20 @@ import {
   saveDataToDrive,
   type DriveFileMeta,
 } from './services/googleDrive';
+import {
+  createBillInCloud,
+  createTransactionInCloud,
+  deleteBillFromCloud,
+  deleteTransactionFromCloud,
+  ensureUserHousehold,
+  joinHouseholdByInviteCode,
+  replaceAllHouseholdDataInCloud,
+  subscribeHousehold,
+  updateBillInCloud,
+  updateHouseholdSettingsInCloud,
+  updateTransactionInCloud,
+  type CloudHouseholdMeta,
+} from './services/householdSync';
 import type {
   ActiveUser,
   HouseholdSettings,
@@ -265,13 +280,25 @@ export default function App() {
     }
   });
 
-  // Google Drive Auth & Sync State (token kept strictly in memory)
+  // Google Auth, Real-Time Online Cloud Sync (Firestore), and Drive Backup State
   const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [activeHouseholdId, setActiveHouseholdId] = useState<string | null>(null);
+  const [cloudMeta, setCloudMeta] = useState<CloudHouseholdMeta | null>(null);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<
+    'offline' | 'connecting' | 'synced' | 'error'
+  >('offline');
+  const [cloudSyncError, setCloudSyncError] = useState('');
+
   const [hasDriveToken, setHasDriveToken] = useState(false);
   const [driveFile, setDriveFile] = useState<DriveFileMeta | null>(null);
   const [driveBusy, setDriveBusy] = useState(false);
   const [driveError, setDriveError] = useState('');
+  const [driveErrorCode, setDriveErrorCode] = useState('');
   const [driveSuccess, setDriveSuccess] = useState('');
+
+  const latestLocalRef = useRef<StoredState>({ transactions, bills, settings });
+  latestLocalRef.current = { transactions, bills, settings };
+  const settingsSyncTimerRef = useRef<number | null>(null);
 
   // Persist locally so offline/mobile usage is always instant
   useEffect(() => {
@@ -283,6 +310,14 @@ export default function App() {
     }
   }, [transactions, bills, settings]);
 
+  useEffect(() => {
+    return () => {
+      if (settingsSyncTimerRef.current !== null) {
+        window.clearTimeout(settingsSyncTimerRef.current);
+      }
+    };
+  }, []);
+
   const handleDriveError = useCallback((err: unknown, fallbackMsg: string) => {
     if (err instanceof DriveAuthError) {
       clearCachedAccessToken();
@@ -291,6 +326,7 @@ export default function App() {
         markNeedsConsentPrompt();
       }
     }
+    setDriveErrorCode(err instanceof GoogleAuthError ? err.code : '');
     setDriveError(err instanceof Error ? err.message : fallbackMsg);
   }, []);
 
@@ -303,6 +339,7 @@ export default function App() {
       }
       setDriveBusy(true);
       setDriveError('');
+      setDriveErrorCode('');
       try {
         const found = await findDriveDataFile(token);
         setDriveFile(found);
@@ -317,33 +354,99 @@ export default function App() {
     [handleDriveError]
   );
 
-  // Initialize Firebase Auth listener for Google Drive
+  // Initialize Firebase Auth listener (persists across reloads for real-time Cloud Sync)
   useEffect(() => {
-    const unsubscribe = initGoogleAuth(
-      (user, token) => {
-        setGoogleUser(user);
-        setHasDriveToken(Boolean(token));
-        void refreshDriveFileMeta(token);
-      },
-      (user) => {
-        setGoogleUser(user);
-        setHasDriveToken(false);
+    const unsubscribe = initGoogleAuth((user, driveToken) => {
+      setGoogleUser(user);
+      setHasDriveToken(Boolean(driveToken));
+      if (user && driveToken) {
+        void refreshDriveFileMeta(driveToken);
       }
-    );
+      if (!user) {
+        setActiveHouseholdId(null);
+        setCloudMeta(null);
+        setCloudSyncStatus('offline');
+        setCloudSyncError('');
+      }
+    });
     return () => unsubscribe();
   }, [refreshDriveFileMeta]);
+
+  // Provision or resolve the user's shared household in Firestore on sign-in
+  useEffect(() => {
+    if (!googleUser) return;
+    let cancelled = false;
+    setCloudSyncStatus('connecting');
+    setCloudSyncError('');
+
+    void ensureUserHousehold(googleUser, latestLocalRef.current)
+      .then((hhId) => {
+        if (!cancelled) {
+          setActiveHouseholdId(hhId);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setCloudSyncStatus('error');
+          setCloudSyncError(
+            err instanceof Error
+              ? err.message
+              : 'មិនអាចភ្ជាប់ទៅមូលដ្ឋានទិន្នន័យ Cloud អនឡាញបានទេ។'
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [googleUser]);
+
+  // Live real-time Firestore subscription across all devices
+  useEffect(() => {
+    if (!googleUser || !activeHouseholdId) return;
+    setCloudSyncStatus('connecting');
+    setCloudSyncError('');
+
+    const unsubscribe = subscribeHousehold(activeHouseholdId, googleUser.uid, {
+      onHouseholdMeta: (meta) => {
+        setCloudMeta(meta);
+        setSettings(meta.settings);
+        setCloudSyncStatus('synced');
+        setCloudSyncError('');
+      },
+      onTransactions: (cloudTxs) => {
+        setTransactions(cloudTxs);
+        setCloudSyncStatus('synced');
+      },
+      onBills: (cloudBills) => {
+        setBills(cloudBills);
+        setCloudSyncStatus('synced');
+      },
+      onError: (err) => {
+        setCloudSyncStatus('error');
+        setCloudSyncError(err.message);
+      },
+    });
+
+    return () => unsubscribe();
+  }, [googleUser, activeHouseholdId]);
 
   const handleGoogleSignIn = async () => {
     setDriveBusy(true);
     setDriveError('');
+    setDriveErrorCode('');
     setDriveSuccess('');
     try {
       const result = await signInWithGoogleDrive();
       setGoogleUser(result.user);
-      setHasDriveToken(true);
-      const ok = await refreshDriveFileMeta(result.accessToken);
-      if (ok) {
-        setDriveSuccess('បានភ្ជាប់ Google Drive ដោយជោគជ័យ។');
+      setHasDriveToken(Boolean(result.accessToken));
+      if (result.accessToken) {
+        const ok = await refreshDriveFileMeta(result.accessToken);
+        if (ok) {
+          setDriveSuccess('បានភ្ជាប់អនឡាញ និង Google Drive ដោយជោគជ័យ។');
+        }
+      } else {
+        setDriveSuccess('បានភ្ជាប់គណនីអនឡាញគ្រប់ឧបករណ៍ដោយជោគជ័យ។');
       }
     } catch (err: unknown) {
       handleDriveError(err, 'ការចូលគណនី Google មិនបានជោគជ័យទេ។');
@@ -359,11 +462,23 @@ export default function App() {
     try {
       await signOutGoogle();
       setGoogleUser(null);
+      setActiveHouseholdId(null);
+      setCloudMeta(null);
+      setCloudSyncStatus('offline');
+      setCloudSyncError('');
       setHasDriveToken(false);
       setDriveFile(null);
     } finally {
       setDriveBusy(false);
     }
+  };
+
+  const handleJoinHousehold = async (inviteCode: string) => {
+    if (!googleUser) {
+      throw new Error('សូមចូលគណនី Google ជាមុនសិន។');
+    }
+    const joinedId = await joinHouseholdByInviteCode(googleUser, inviteCode);
+    setActiveHouseholdId(joinedId);
   };
 
   const handleConfirmSaveToDrive = async () => {
@@ -402,12 +517,30 @@ export default function App() {
       if (!Array.isArray(loaded.transactions) || !Array.isArray(loaded.bills)) {
         throw new Error('ទម្រង់ឯកសារនៅលើ Google Drive មិនត្រឹមត្រូវទេ។');
       }
-      setTransactions(normalizeTransactions(loaded.transactions));
-      setBills(normalizeBills(loaded.bills));
-      if (loaded.settings) {
-        setSettings(normalizeSettings(loaded.settings));
-      }
+      const nextTransactions = normalizeTransactions(loaded.transactions);
+      const nextBills = normalizeBills(loaded.bills);
+      const nextSettings = loaded.settings ? normalizeSettings(loaded.settings) : settings;
+      setTransactions(nextTransactions);
+      setBills(nextBills);
+      setSettings(nextSettings);
       setCycleOffset(0);
+
+      if (googleUser && activeHouseholdId) {
+        const memberIds =
+          cloudMeta && cloudMeta.memberIds.length > 0
+            ? cloudMeta.memberIds
+            : [googleUser.uid];
+        await replaceAllHouseholdDataInCloud(
+          activeHouseholdId,
+          googleUser.uid,
+          memberIds,
+          {
+            transactions: nextTransactions,
+            bills: nextBills,
+            settings: nextSettings,
+          }
+        );
+      }
       setDriveSuccess('បានទាញយកទិន្នន័យពី Google Drive មកប្រើដោយជោគជ័យ។');
     } catch (err: unknown) {
       handleDriveError(err, 'មិនអាចទាញយកទិន្នន័យពី Google Drive បានទេ។');
@@ -511,8 +644,16 @@ export default function App() {
     handleUpdateSettings({ activeUser: user });
   };
 
+  const getActiveMemberIds = (): string[] => {
+    if (cloudMeta && cloudMeta.memberIds.length > 0) {
+      return cloudMeta.memberIds;
+    }
+    return googleUser ? [googleUser.uid] : [];
+  };
+
   const handleUpdateSettings = (patch: Partial<HouseholdSettings>) => {
-    setSettings((prev) => ({ ...prev, ...patch }));
+    const nextSettings: HouseholdSettings = { ...settings, ...patch };
+    setSettings(nextSettings);
     if (
       patch.cycleMode !== undefined ||
       patch.cycleStartDay !== undefined ||
@@ -521,6 +662,21 @@ export default function App() {
     ) {
       setCycleOffset(0);
     }
+    if (googleUser && activeHouseholdId) {
+      if (settingsSyncTimerRef.current !== null) {
+        window.clearTimeout(settingsSyncTimerRef.current);
+      }
+      const targetHouseholdId = activeHouseholdId;
+      settingsSyncTimerRef.current = window.setTimeout(() => {
+        void updateHouseholdSettingsInCloud(targetHouseholdId, nextSettings).catch(
+          (err: unknown) => {
+            setCloudSyncError(
+              err instanceof Error ? err.message : 'មិនអាចរក្សាទុកការកំណត់អនឡាញបានទេ។'
+            );
+          }
+        );
+      }, 300);
+    }
   };
 
   const handleSaveTransaction = (
@@ -528,9 +684,27 @@ export default function App() {
     editId?: string
   ) => {
     if (editId) {
+      const existingTx = transactions.find((tx) => tx.id === editId);
+      const updatedTx: Transaction = {
+        ...(existingTx || {
+          id: editId,
+          createdAt: new Date().toISOString(),
+        }),
+        ...data,
+        id: editId,
+      };
       setTransactions((prev) =>
-        prev.map((tx) => (tx.id === editId ? { ...tx, ...data } : tx))
+        prev.map((tx) => (tx.id === editId ? updatedTx : tx))
       );
+      if (googleUser && activeHouseholdId) {
+        void updateTransactionInCloud(activeHouseholdId, updatedTx).catch(
+          (err: unknown) => {
+            setCloudSyncError(
+              err instanceof Error ? err.message : 'មិនអាចកែប្រែទិន្នន័យអនឡាញបានទេ។'
+            );
+          }
+        );
+      }
     } else {
       const newTx: Transaction = {
         ...data,
@@ -538,11 +712,24 @@ export default function App() {
         createdAt: new Date().toISOString(),
       };
       setTransactions((prev) => [newTx, ...prev]);
+      if (googleUser && activeHouseholdId) {
+        void createTransactionInCloud(
+          activeHouseholdId,
+          googleUser.uid,
+          getActiveMemberIds(),
+          newTx
+        ).catch((err: unknown) => {
+          setCloudSyncError(
+            err instanceof Error ? err.message : 'មិនអាចរក្សាទុកកំណត់ត្រាអនឡាញបានទេ។'
+          );
+        });
+      }
     }
   };
 
   const handleDeleteTransaction = (id: string) => {
     setTransactions((prev) => prev.filter((tx) => tx.id !== id));
+    const affectedBills: RecurringBill[] = [];
     setBills((prev) =>
       prev.map((bill) => {
         const nextPaid = { ...bill.paidCycles };
@@ -553,9 +740,20 @@ export default function App() {
             changed = true;
           }
         }
-        return changed ? { ...bill, paidCycles: nextPaid } : bill;
+        if (changed) {
+          const updated = { ...bill, paidCycles: nextPaid };
+          affectedBills.push(updated);
+          return updated;
+        }
+        return bill;
       })
     );
+    if (googleUser && activeHouseholdId) {
+      void deleteTransactionFromCloud(activeHouseholdId, id).catch(() => {});
+      for (const updatedBill of affectedBills) {
+        void updateBillInCloud(activeHouseholdId, updatedBill).catch(() => {});
+      }
+    }
   };
 
   const handleSaveBill = (
@@ -563,9 +761,18 @@ export default function App() {
     editId?: string
   ) => {
     if (editId) {
+      const existingBill = bills.find((b) => b.id === editId);
+      const updatedBill: RecurringBill = {
+        ...(existingBill || { id: editId, paidCycles: {} }),
+        ...data,
+        id: editId,
+      };
       setBills((prev) =>
-        prev.map((b) => (b.id === editId ? { ...b, ...data } : b))
+        prev.map((b) => (b.id === editId ? updatedBill : b))
       );
+      if (googleUser && activeHouseholdId) {
+        void updateBillInCloud(activeHouseholdId, updatedBill).catch(() => {});
+      }
     } else {
       const newBill: RecurringBill = {
         ...data,
@@ -573,11 +780,22 @@ export default function App() {
         paidCycles: {},
       };
       setBills((prev) => [...prev, newBill]);
+      if (googleUser && activeHouseholdId) {
+        void createBillInCloud(
+          activeHouseholdId,
+          googleUser.uid,
+          getActiveMemberIds(),
+          newBill
+        ).catch(() => {});
+      }
     }
   };
 
   const handleDeleteBill = (id: string) => {
     setBills((prev) => prev.filter((b) => b.id !== id));
+    if (googleUser && activeHouseholdId) {
+      void deleteBillFromCloud(activeHouseholdId, id).catch(() => {});
+    }
   };
 
   const payBillForCycle = (bill: RecurringBill, targetCycle: typeof activeCycle) => {
@@ -601,15 +819,23 @@ export default function App() {
       billId: bill.id,
       createdAt: new Date().toISOString(),
     };
+    const updatedBill: RecurringBill = {
+      ...bill,
+      paidCycles: { ...bill.paidCycles, [targetCycle.key]: txId },
+    };
 
     setTransactions((prev) => [newTx, ...prev]);
-    setBills((prev) =>
-      prev.map((b) =>
-        b.id === bill.id
-          ? { ...b, paidCycles: { ...b.paidCycles, [targetCycle.key]: txId } }
-          : b
-      )
-    );
+    setBills((prev) => prev.map((b) => (b.id === bill.id ? updatedBill : b)));
+
+    if (googleUser && activeHouseholdId) {
+      void createTransactionInCloud(
+        activeHouseholdId,
+        googleUser.uid,
+        getActiveMemberIds(),
+        newTx
+      ).catch(() => {});
+      void updateBillInCloud(activeHouseholdId, updatedBill).catch(() => {});
+    }
   };
 
   const handlePayBill = (bill: RecurringBill) => {
@@ -641,12 +867,26 @@ export default function App() {
       if (!Array.isArray(parsed.transactions) || !Array.isArray(parsed.bills)) {
         return 'ឯកសារ JSON មិនត្រឹមត្រូវតាមទម្រង់ប្រព័ន្ធទេ។';
       }
-      setTransactions(normalizeTransactions(parsed.transactions));
-      setBills(normalizeBills(parsed.bills));
-      if (parsed.settings) {
-        setSettings(normalizeSettings(parsed.settings));
-      }
+      const nextTransactions = normalizeTransactions(parsed.transactions);
+      const nextBills = normalizeBills(parsed.bills);
+      const nextSettings = parsed.settings ? normalizeSettings(parsed.settings) : settings;
+      setTransactions(nextTransactions);
+      setBills(nextBills);
+      setSettings(nextSettings);
       setCycleOffset(0);
+
+      if (googleUser && activeHouseholdId) {
+        void replaceAllHouseholdDataInCloud(
+          activeHouseholdId,
+          googleUser.uid,
+          getActiveMemberIds(),
+          {
+            transactions: nextTransactions,
+            bills: nextBills,
+            settings: nextSettings,
+          }
+        ).catch(() => {});
+      }
       return null;
     } catch {
       return 'មិនអាចអានឯកសារ JSON បានទេ សូមពិនិត្យម្តងទៀត។';
@@ -659,12 +899,37 @@ export default function App() {
     setBills(seed.bills);
     setSettings(DEFAULT_SETTINGS);
     setCycleOffset(0);
+    if (googleUser && activeHouseholdId) {
+      void replaceAllHouseholdDataInCloud(
+        activeHouseholdId,
+        googleUser.uid,
+        getActiveMemberIds(),
+        {
+          transactions: seed.transactions,
+          bills: seed.bills,
+          settings: DEFAULT_SETTINGS,
+        }
+      ).catch(() => {});
+    }
   };
 
   const handleClearAllTransactions = () => {
+    const clearedBills = bills.map((b) => ({ ...b, paidCycles: {} }));
     setTransactions([]);
-    setBills((prev) => prev.map((b) => ({ ...b, paidCycles: {} })));
+    setBills(clearedBills);
     setCycleOffset(0);
+    if (googleUser && activeHouseholdId) {
+      void replaceAllHouseholdDataInCloud(
+        activeHouseholdId,
+        googleUser.uid,
+        getActiveMemberIds(),
+        {
+          transactions: [],
+          bills: clearedBills,
+          settings,
+        }
+      ).catch(() => {});
+    }
   };
 
   const toggleCurrency = () => {
@@ -742,11 +1007,11 @@ export default function App() {
                 setDriveModalOpen(true);
               }}
               className={`min-h-[40px] min-w-[40px] px-2.5 flex items-center justify-center gap-1.5 rounded-xl border text-xs font-medium transition-colors whitespace-nowrap ${
-                hasDriveToken
+                googleUser || hasDriveToken
                   ? 'border-teal-200 bg-teal-50 text-teal-800'
                   : 'border-slate-200 bg-white text-slate-700'
               }`}
-              aria-label="Google Drive"
+              aria-label="សមកាលកម្មអនឡាញ និង Google Drive"
             >
               <Cloud className="w-4 h-4 shrink-0" />
             </button>
@@ -841,6 +1106,8 @@ export default function App() {
               categories={DEFAULT_CATEGORIES}
               bills={bills}
               googleUser={googleUser}
+              cloudInviteCode={cloudMeta?.inviteCode}
+              cloudMemberCount={cloudMeta?.memberIds.length}
               hasDriveToken={hasDriveToken}
               driveFile={driveFile}
               driveBusy={driveBusy}
@@ -921,21 +1188,27 @@ export default function App() {
         isOpen={driveModalOpen}
         onClose={() => setDriveModalOpen(false)}
         googleUser={googleUser}
+        cloudMeta={cloudMeta}
+        cloudSyncStatus={cloudSyncStatus}
+        cloudSyncError={cloudSyncError}
         hasDriveToken={hasDriveToken}
         driveFile={driveFile}
         isBusy={driveBusy}
         errorMsg={driveError}
+        errorCode={driveErrorCode}
         successMsg={driveSuccess}
         localTxCount={transactions.length}
         localBillCount={bills.length}
         onSignIn={handleGoogleSignIn}
         onSignOut={handleGoogleSignOut}
+        onJoinHousehold={handleJoinHousehold}
         onRefreshFile={async () => {
           await refreshDriveFileMeta();
         }}
         onConfirmSaveToDrive={handleConfirmSaveToDrive}
         onConfirmLoadFromDrive={handleConfirmLoadFromDrive}
         onConfirmDeleteDriveFile={handleConfirmDeleteDriveFile}
+        onExportLocalBackup={handleExportBackup}
       />
 
       <NotificationsModal

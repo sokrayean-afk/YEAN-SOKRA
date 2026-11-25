@@ -1,0 +1,471 @@
+{
+  "entities": {
+    "UserWorkspace": {
+      "title": "UserWorkspace",
+      "description": "Maps an authenticated user UID to their active shared household ID without storing PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Authenticated user UID."
+        },
+        "activeHouseholdId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Active household document ID currently synced by this user."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user workspace was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user workspace was last updated."
+        }
+      },
+      "required": ["uid", "activeHouseholdId", "createdAt", "updatedAt"]
+    },
+    "Household": {
+      "title": "Household",
+      "description": "Shared household settings, cycle configuration, and member access control metadata.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the user who created the household."
+        },
+        "memberIds": {
+          "type": "array",
+          "description": "Bounded list (1 to 5) of member UIDs authorized to sync this household."
+        },
+        "inviteCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 12,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Short uppercase alphanumeric invite code allowing a spouse to join this household."
+        },
+        "householdName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Display name of the household."
+        },
+        "husbandName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Display name for Husband profile."
+        },
+        "wifeName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Display name for Wife profile."
+        },
+        "activeUser": {
+          "type": "string",
+          "enum": ["husband", "wife"],
+          "description": "Default active recorder profile."
+        },
+        "cycleMode": {
+          "type": "string",
+          "enum": ["monthly_day", "custom_range"],
+          "description": "Monthly cutoff mode."
+        },
+        "cycleStartDay": {
+          "type": "integer",
+          "description": "Day of month (1-28) when the monthly cycle begins."
+        },
+        "customStartDate": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Custom cycle start date in YYYY-MM-DD format."
+        },
+        "customEndDate": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Custom cycle end date in YYYY-MM-DD format."
+        },
+        "displayCurrency": {
+          "type": "string",
+          "enum": ["USD", "KHR"],
+          "description": "Preferred display currency."
+        },
+        "exchangeRate": {
+          "type": "number",
+          "description": "KHR per 1 USD exchange rate."
+        },
+        "monthlyBudgetTargetUsd": {
+          "type": "number",
+          "description": "Overall monthly expense budget target in USD."
+        },
+        "notificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether recurring bill reminders are enabled."
+        },
+        "reminderDaysBefore": {
+          "type": "integer",
+          "description": "Lead days before due date to trigger reminders (1-10)."
+        },
+        "browserNotificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether browser notification API reminders are enabled."
+        },
+        "categoryBudgets": {
+          "type": "object",
+          "description": "Map of expense category IDs to USD budget limits."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when household was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when household settings were last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "memberIds",
+        "inviteCode",
+        "householdName",
+        "husbandName",
+        "wifeName",
+        "activeUser",
+        "cycleMode",
+        "cycleStartDay",
+        "customStartDate",
+        "customEndDate",
+        "displayCurrency",
+        "exchangeRate",
+        "monthlyBudgetTargetUsd",
+        "notificationsEnabled",
+        "reminderDaysBefore",
+        "browserNotificationsEnabled",
+        "categoryBudgets",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "HouseholdMember": {
+      "title": "HouseholdMember",
+      "description": "Authoritative subcollection membership record for a household.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Member user UID."
+        },
+        "householdId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent household ID."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["owner", "member"],
+          "description": "Role within the household."
+        },
+        "inviteCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 12,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Invite code used to create or join the household."
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when member joined."
+        }
+      },
+      "required": ["uid", "householdId", "role", "inviteCode", "joinedAt"]
+    },
+    "HouseholdInvite": {
+      "title": "HouseholdInvite",
+      "description": "Lookup record mapping an invite code to a household ID so a spouse can join across devices.",
+      "type": "object",
+      "properties": {
+        "inviteCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 12,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Invite code matching the document ID."
+        },
+        "householdId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Target household ID."
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner UID of the household."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when invite was created."
+        }
+      },
+      "required": ["inviteCode", "householdId", "ownerId", "createdAt"]
+    },
+    "HouseholdTransaction": {
+      "title": "HouseholdTransaction",
+      "description": "Income or expense transaction synchronized across all household devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Transaction ID matching document ID."
+        },
+        "householdId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent household ID."
+        },
+        "authorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the user who created the transaction."
+        },
+        "memberIds": {
+          "type": "array",
+          "description": "Bounded list (1 to 5) of member UIDs authorized to query this transaction."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["income", "expense"],
+          "description": "Transaction direction."
+        },
+        "amountUsd": {
+          "type": "number",
+          "description": "Amount normalized in USD."
+        },
+        "originalAmount": {
+          "type": "number",
+          "description": "Amount in original entered currency."
+        },
+        "originalCurrency": {
+          "type": "string",
+          "enum": ["USD", "KHR"],
+          "description": "Original currency entered."
+        },
+        "categoryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Category identifier."
+        },
+        "date": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Transaction date in YYYY-MM-DD format."
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["cash", "aba", "acleda", "wing", "other"],
+          "description": "Payment channel."
+        },
+        "member": {
+          "type": "string",
+          "enum": ["joint", "husband", "wife", "family"],
+          "description": "Household member attribution."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Optional note."
+        },
+        "billId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]*$",
+          "description": "Optional recurring bill ID linked to this transaction."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when transaction was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when transaction was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "householdId",
+        "authorId",
+        "memberIds",
+        "type",
+        "amountUsd",
+        "originalAmount",
+        "originalCurrency",
+        "categoryId",
+        "date",
+        "paymentMethod",
+        "member",
+        "note",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "HouseholdBill": {
+      "title": "HouseholdBill",
+      "description": "Recurring monthly household bill synchronized across all household devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Bill ID matching document ID."
+        },
+        "householdId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent household ID."
+        },
+        "authorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the user who created the bill."
+        },
+        "memberIds": {
+          "type": "array",
+          "description": "Bounded list (1 to 5) of member UIDs authorized to query this bill."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Bill name."
+        },
+        "categoryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Expense category identifier."
+        },
+        "amountUsd": {
+          "type": "number",
+          "description": "Recurring amount in USD."
+        },
+        "dueDay": {
+          "type": "integer",
+          "description": "Monthly due day (1-28)."
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["cash", "aba", "acleda", "wing", "other"],
+          "description": "Payment channel."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Optional note."
+        },
+        "paidCycles": {
+          "type": "object",
+          "description": "Map of cycle key to paid transaction ID."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when bill was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when bill was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "householdId",
+        "authorId",
+        "memberIds",
+        "title",
+        "categoryId",
+        "amountUsd",
+        "dueDay",
+        "paymentMethod",
+        "note",
+        "paidCycles",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserWorkspace" },
+      "description": "Per-user pointer to their active synchronized household."
+    },
+    "/householdInvites/{inviteCode}": {
+      "schema": { "$ref": "#/entities/HouseholdInvite" },
+      "description": "Direct get-only lookup mapping an invite code to its household ID."
+    },
+    "/households/{householdId}": {
+      "schema": { "$ref": "#/entities/Household" },
+      "description": "Shared household settings, cycle rules, and membership metadata."
+    },
+    "/households/{householdId}/members/{memberUid}": {
+      "schema": { "$ref": "#/entities/HouseholdMember" },
+      "description": "Authoritative subcollection of members belonging to a household."
+    },
+    "/households/{householdId}/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/HouseholdTransaction" },
+      "description": "Household income and expense records synchronized across devices."
+    },
+    "/households/{householdId}/bills/{billId}": {
+      "schema": { "$ref": "#/entities/HouseholdBill" },
+      "description": "Recurring household bill schedules synchronized across devices."
+    }
+  }
+}
